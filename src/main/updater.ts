@@ -32,7 +32,9 @@ export function initUpdater(getWin: () => BrowserWindow | null): void {
 		setTimeout(() => autoUpdater.quitAndInstall(), 200);
 	});
 
-	ipcMain.handle("update:download", () => {
+	// the renderer sends (not invokes) — must be .on, not .handle, or the
+	// click silently goes nowhere
+	ipcMain.on("update:download", () => {
 		console.log("[updater] download requested");
 		void autoUpdater.downloadUpdate().catch((err) => {
 			console.log(`[updater] download failed: ${err && err.message ? err.message : err}`);
