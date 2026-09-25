@@ -1,0 +1,494 @@
+:root {
+	--bg1: #1c1917;
+	--bg2: #141312;
+	--accent: #a78bfa;
+	--text: #f5f5f4;
+	--text-dim: rgba(245, 245, 244, 0.45);
+	--titlebar-h: 36px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+	height: 100%;
+	overflow: hidden;
+}
+
+body {
+	font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+	color: var(--text);
+	background: var(--bg2);
+	transition: background 1.2s ease;
+}
+
+#ambient {
+	position: fixed;
+	inset: -120px;
+	background: linear-gradient(160deg, var(--bg1), var(--bg2));
+	background-size: cover;
+	z-index: -1;
+	transition: background 1.2s ease;
+}
+
+/* fluid WebGL background tinted with the cover palette; rendered at low
+   resolution and blurred. #ambient above is the fallback when the WebGL
+   context is unavailable (fluid-bg.js then leaves the canvas blank). */
+#bg-canvas {
+	position: fixed;
+	inset: -90px;
+	width: calc(100% + 180px);
+	height: calc(100% + 180px);
+	z-index: -1;
+	pointer-events: none;
+	filter: blur(46px) saturate(1.2);
+	opacity: 0;
+	transition: opacity 1.6s ease;
+}
+
+#bg-canvas.on {
+	opacity: 1;
+}
+
+/* the hidden native title bar leaves no draggable area over web content —
+   provide one along the top edge, clear of the window-control buttons */
+#drag-region {
+	position: fixed;
+	top: 0;
+	left: 0;
+	width: calc(100% - 150px);
+	height: var(--titlebar-h);
+	-webkit-app-region: drag;
+	z-index: 3;
+}
+
+.hidden { display: none !important; }
+
+#app {
+	display: flex;
+	height: 100vh;
+	padding-top: var(--titlebar-h); /* native title-bar overlay sits on top */
+}
+
+/* ---------- left side ---------- */
+
+#side {
+	width: 50%;
+	min-width: 50%;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: clamp(16px, 2.8vh, 26px);
+	padding: 4vh 3vw;
+}
+
+#lyrics-source {
+	font-size: 11px;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+	color: var(--text-dim);
+	opacity: 0;
+	transition: opacity 0.25s ease;
+	max-width: min(38vh, 21vw);
+	min-height: 15px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	user-select: none;
+	cursor: default;
+}
+
+#lyrics-source.visible,
+#lyrics-source:hover {
+	opacity: 0.85;
+}
+
+#cover-wrap {
+	width: min(38vh, 21vw);
+	height: min(38vh, 21vw);
+	border-radius: 16px;
+	overflow: hidden;
+	position: relative;
+	box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+	background: rgba(255, 255, 255, 0.06);
+	transition: opacity 0.5s ease, filter 0.5s ease;
+}
+
+#app.idle #cover-wrap {
+	opacity: 0.45;
+	filter: saturate(0.6);
+}
+
+#cover {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	display: none;
+}
+
+#cover-placeholder {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: rgba(255, 255, 255, 0.25);
+}
+
+#cover-controls {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 18px;
+	background: rgba(0, 0, 0, 0.45);
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 0.3s ease;
+}
+
+#cover-wrap:hover #cover-controls {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+.ctrl {
+	width: 44px;
+	height: 44px;
+	border: none;
+	border-radius: 50%;
+	background: rgba(255, 255, 255, 0.15);
+	color: var(--text);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.ctrl:hover { background: rgba(255, 255, 255, 0.28); }
+.ctrl:active { transform: scale(0.94); }
+.ctrl:disabled { opacity: 0.35; cursor: default; }
+
+.ctrl svg { width: 22px; height: 22px; }
+
+.ctrl.big {
+	width: 60px;
+	height: 60px;
+	background: var(--accent);
+	color: #17141c;
+}
+
+.ctrl.big:hover { filter: brightness(1.1); }
+.ctrl.big svg { width: 30px; height: 30px; }
+
+#meta {
+	text-align: center;
+	max-width: 100%;
+}
+
+#track-title {
+	font-size: clamp(18px, 1.6vw, 25px);
+	font-weight: 700;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: min(44vh, 24vw);
+}
+
+#track-artist {
+	font-size: clamp(13px, 1.1vw, 17px);
+	color: var(--text-dim);
+	margin-top: 4px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: min(44vh, 24vw);
+}
+
+/* hidden until the side panel is hovered, Yandex-Music style */
+.reveal {
+	opacity: 0;
+	transition: opacity 0.3s ease;
+}
+
+#side:hover .reveal {
+	opacity: 1;
+}
+
+#seek-area {
+	width: min(38vh, 21vw);
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+#seekbar {
+	height: 5px;
+	border-radius: 3px;
+	background: rgba(255, 255, 255, 0.12);
+	cursor: pointer;
+	overflow: hidden;
+}
+
+#seekfill {
+	height: 100%;
+	width: 0%;
+	border-radius: 3px;
+	background: var(--accent);
+}
+
+#time {
+	display: flex;
+	justify-content: space-between;
+	font-size: 12px;
+	color: var(--text-dim);
+	font-variant-numeric: tabular-nums;
+}
+
+#side-buttons {
+	position: relative;
+	display: flex;
+	gap: 10px;
+}
+
+.side-btn {
+	width: 42px;
+	height: 42px;
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	background: transparent;
+	color: var(--text-dim);
+	border-radius: 50%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	opacity: 0.55;
+	transition: color 0.15s ease, border-color 0.15s ease, opacity 0.3s ease,
+		background 0.15s ease;
+}
+
+#side:hover .side-btn {
+	opacity: 1;
+}
+
+.side-btn:hover {
+	color: var(--text);
+	border-color: rgba(255, 255, 255, 0.3);
+	background: rgba(255, 255, 255, 0.06);
+}
+
+.side-btn svg { width: 18px; height: 18px; }
+
+/* ---------- lyrics ---------- */
+
+#lyrics-wrap {
+	flex: 1;
+	overflow: hidden;
+	position: relative;
+	mask-image: linear-gradient(
+		to bottom,
+		transparent 0%,
+		black 12%,
+		black 88%,
+		transparent 100%
+	);
+	-webkit-mask-image: linear-gradient(
+		to bottom,
+		transparent 0%,
+		black 12%,
+		black 88%,
+		transparent 100%
+	);
+}
+
+#lyrics {
+	height: 100%;
+	overflow-y: auto;
+	scrollbar-width: none;
+	display: flex;
+	flex-direction: column;
+	padding: 12vh 4vw 12vh 2vw;
+	position: relative;
+}
+
+/* margin:auto centers short content but stays fully scrollable when long
+   (plain justify-content:center makes the top unreachable) */
+#lyrics .lyrics-inner {
+	margin: auto 0;
+}
+
+#lyrics::-webkit-scrollbar { display: none; }
+
+.line {
+	font-size: clamp(20px, 2.1vw, 34px);
+	font-weight: 400;
+	line-height: 1.5;
+	color: var(--text-dim);
+	padding: 7px 0;
+	cursor: default;
+	/* no font-weight change on .active: bold re-wraps long lines and makes
+	   words jump — emphasis is done with color/scale/text-shadow instead,
+	   which never affect layout */
+	transition: color 0.5s ease, transform 0.5s ease, opacity 0.5s ease,
+		filter 0.5s ease, text-shadow 0.5s ease;
+	transform-origin: left center;
+	user-select: none;
+}
+
+.line.clickable { cursor: pointer; }
+
+.line.active {
+	color: var(--text);
+	transform: scale(1.06);
+	text-shadow: 0 0 1.2px currentColor;
+}
+
+.line.past { color: rgba(245, 245, 244, 0.28); }
+
+.line.placeholder {
+	color: var(--text-dim);
+	font-size: clamp(16px, 1.5vw, 22px);
+	font-weight: 400;
+	text-align: center;
+	white-space: pre-line;
+	line-height: 1.7;
+}
+
+.line.placeholder.instrumental {
+	font-size: clamp(18px, 1.8vw, 26px);
+	letter-spacing: 0.02em;
+}
+
+/* ---------- lyrics loader ---------- */
+
+.loader-dots {
+	display: inline-flex;
+	gap: 5px;
+	margin-left: 10px;
+	vertical-align: middle;
+}
+
+.loader-dots span {
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: currentColor;
+	animation: dot-pulse 1.2s ease-in-out infinite;
+}
+
+.loader-dots span:nth-child(2) { animation-delay: 0.15s; }
+.loader-dots span:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes dot-pulse {
+	0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+	30% { opacity: 1; transform: translateY(-3px); }
+}
+
+/* ---------- modal ---------- */
+
+.modal {
+	position: fixed;
+	inset: 0;
+	background: rgba(0, 0, 0, 0.55);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	z-index: 10;
+	backdrop-filter: blur(4px);
+}
+
+.modal-card {
+	width: 520px;
+	max-width: 90vw;
+	background: #201d1b;
+	border: 1px solid rgba(255, 255, 255, 0.09);
+	border-radius: 16px;
+	padding: 24px;
+	box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+}
+
+.modal-card h2 { font-size: 18px; margin-bottom: 8px; }
+
+.hint {
+	font-size: 13px;
+	color: var(--text-dim);
+	line-height: 1.5;
+	margin-bottom: 16px;
+}
+
+#folder-list {
+	list-style: none;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-bottom: 16px;
+	max-height: 220px;
+	overflow-y: auto;
+}
+
+#folder-list li {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	background: rgba(255, 255, 255, 0.05);
+	border-radius: 10px;
+	padding: 10px 12px;
+	font-size: 13px;
+	word-break: break-all;
+}
+
+#folder-list .rm {
+	border: none;
+	background: transparent;
+	color: var(--text-dim);
+	cursor: pointer;
+	font-size: 16px;
+	padding: 2px 6px;
+	border-radius: 6px;
+	flex-shrink: 0;
+}
+
+#folder-list .rm:hover { color: #f87171; background: rgba(248, 113, 113, 0.12); }
+
+.modal-actions {
+	display: flex;
+	gap: 10px;
+}
+
+.modal-actions button {
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	background: transparent;
+	color: var(--text);
+	border-radius: 10px;
+	padding: 9px 16px;
+	font-size: 13px;
+	font-family: inherit;
+	cursor: pointer;
+	transition: background 0.15s ease;
+}
+
+.modal-actions button:hover { background: rgba(255, 255, 255, 0.08); }
+
+.modal-actions button.primary {
+	background: var(--accent);
+	border-color: transparent;
+	color: #17141c;
+	font-weight: 600;
+}
+
+.modal-actions button.primary:hover { filter: brightness(1.1); background: var(--accent); }
+
+#index-stats {
+	margin-top: 14px;
+	font-size: 12px;
+	color: var(--text-dim);
+}
+
+/* ---------- fullscreen ---------- */
+
+/* Sizes are viewport-relative, so fullscreen needs no overrides;
+   body.fullscreen is kept for JS hooks (layout tweaks only). */
+

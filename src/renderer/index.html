@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+	<meta charset="UTF-8">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'">
+	<title>aura</title>
+	<link rel="stylesheet" href="style.css">
+</head>
+<body>
+	<div id="ambient"></div>
+	<canvas id="bg-canvas"></canvas>
+	<div id="drag-region"></div>
+
+	<div id="app">
+		<aside id="side">
+			<div id="lyrics-source"></div>
+			<div id="cover-wrap">
+				<img id="cover" alt="" draggable="false">
+				<div id="cover-placeholder">
+					<svg viewBox="0 0 24 24" width="72" height="72"><path fill="currentColor" d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+				</div>
+				<div id="cover-controls">
+					<button id="btn-prev" class="ctrl" title="Предыдущий">
+						<svg viewBox="0 0 24 24"><path fill="currentColor" d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+					</button>
+					<button id="btn-play" class="ctrl big" title="Играть / Пауза">
+						<svg id="icon-play" viewBox="0 0 24 24"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+						<svg id="icon-pause" viewBox="0 0 24 24" class="hidden"><path fill="currentColor" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+					</button>
+					<button id="btn-next" class="ctrl" title="Следующий">
+						<svg viewBox="0 0 24 24"><path fill="currentColor" d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+					</button>
+				</div>
+			</div>
+			<div id="meta">
+				<div id="track-title">aura</div>
+				<div id="track-artist">Запусти трек в любом плеере</div>
+			</div>
+			<div id="seek-area" class="reveal">
+				<div id="seekbar"><div id="seekfill"></div></div>
+				<div id="time"><span id="time-cur">0:00</span><span id="time-total"></span></div>
+			</div>
+			<div id="side-buttons">
+				<button id="btn-retry" class="side-btn" title="Загрузить текст ещё раз">
+					<svg viewBox="0 0 24 24"><path fill="currentColor" d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+				</button>
+				<button id="btn-settings" class="side-btn" title="Папки с музыкой">
+					<svg viewBox="0 0 24 24"><path fill="currentColor" d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+				</button>
+				<button id="btn-fullscreen" class="side-btn" title="Полный экран (F11)">
+					<svg viewBox="0 0 24 24"><path fill="currentColor" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+				</button>
+				<button id="btn-wrong-lyrics" class="side-btn hidden" title="Не тот текст — искать строже">
+					<svg viewBox="0 0 24 24"><path fill="currentColor" d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+				</button>
+			</div>
+		</aside>
+
+		<main id="lyrics-wrap">
+			<div id="lyrics">
+				<div class="line placeholder">Здесь появится текст песни</div>
+			</div>
+		</main>
+	</div>
+
+	<div id="settings" class="modal hidden">
+		<div class="modal-card">
+			<h2>Папки с музыкой</h2>
+			<p class="hint">Укажи папки, где лежат mp3 и файлы .lrc с текстами. Текст подхватывается автоматически, если .lrc называется так же, как mp3.</p>
+			<ul id="folder-list"></ul>
+			<div class="modal-actions">
+				<button id="btn-add-folder" class="primary">Добавить папку</button>
+				<button id="btn-reindex">Переиндексировать</button>
+				<button id="btn-close-settings">Закрыть</button>
+			</div>
+			<div id="index-stats"></div>
+		</div>
+	</div>
+
+	<script src="fluid-bg.js"></script>
+	<script src="app.js"></script>
+</body>
+</html>
