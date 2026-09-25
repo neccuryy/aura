@@ -204,6 +204,20 @@ export function clearLyricsCache(artist: string | undefined, title: string): voi
 	} catch (_e) {}
 }
 
+// Stage 2 (aura-align): persist a locally computed alignment so the next
+// play starts synced. Only called when no synced version was delivered for
+// the track; still refuses to overwrite a cached synced verdict (a late
+// Lrclib upgrade may have landed after the display was last touched)
+export function saveAlignedLyrics(
+	artist: string | undefined,
+	title: string,
+	lines: { text: string; time: number }[]
+): void {
+	const cached = readCache(artist, title);
+	if (cached && cached.synchronized) return;
+	writeCache(artist, title, { lines, synchronized: true, source: "aura-align" }, true);
+}
+
 async function fetchFromLrclib(
 	title: string,
 	artist: string | undefined,

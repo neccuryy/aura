@@ -9,7 +9,9 @@ import { buildIndex, findTrack, LibraryIndex } from "./library";
 import { parseLrc, decodeLrcBuffer } from "./lrc";
 import { extractPalette } from "./palette";
 import { getFallbackCover, artWidth } from "./cover";
-import { lookupLyrics, pursueLrclib, verifyLrclib, clearLyricsCache } from "./lrclib";
+import { lookupLyrics, pursueLrclib, verifyLrclib, clearLyricsCache, saveAlignedLyrics } from "./lrclib";
+import { startLoopback, stopLoopback, beginTrack, noteTrackPosition, getTrackSegments, getTrackEnergy } from "./loopback";
+import { alignLyrics } from "./align";
 
 interface TrackPayload {
 	empty: boolean;
@@ -48,6 +50,70 @@ let lyricsLaunchedFor: string | null = null; // track id whose Lrclib lookup is 
 let lyricsJobToken = 0;       // bumped to cancel stale Lrclib lookups
 let lastTrackTitle: string | undefined;   // for the "wrong lyrics" cache reset
 let lastTrackArtist: string | undefined;
+
+// Stage 2 (dev-only, loopback-gated): live alignment of plain lyrics.
+// When the only available lyrics are plain text, VAD vocal segments are
+// matched to lines via DP and a synced version is re-sent to the renderer
+// as evidence accumulates; on track end the result is cached so the next
+// play starts synced (never overwriting a real synced verdict).
+let alignLines: { text: string }[] | null = null; // plain lines being aligned
+let alignSource: string | null = null;            // where the plain text came from
+let alignCacheable = false;   // online-sourced — the aligned result may be cached
+let alignSyncedSeen = false;  // a synced version was delivered — alignment off
+let alignLastRun = 0;         // throttle for live re-alignment
+
+const ALIGN_INTERVAL = 5000;      // ms between live re-alignments
+const ALIGN_MIN_SEGMENTS = 2;     // live: don't align before this much evidence
+const ALIGN_CACHE_SEGMENTS = 3;   // cache: minimum evidence to persist
+
+function enterAlignment(lines: { text: string }[], source: string, cacheable: boolean): void {
+	alignLines = lines;
+	alignSource = source;
+	alignCacheable = cacheable;
+	alignLastRun = 0;
+}
+
+function stopAlignment(): void {
+	alignLines = null;
+	alignSource = null;
+	alignCacheable = false;
+}
+
+// track ended (switch or stop) — persist the alignment if it's worth
+// anything. Must run BEFORE the old track's title/segments are reset.
+function finalizeAlignment(): void {
+	const lines = alignLines;
+	const source = alignSource;
+	const cacheable = alignCacheable;
+	stopAlignment();
+	if (!lines || !cacheable || alignSyncedSeen || !lastTrackTitle) return;
+	const segs = getTrackSegments();
+	if (segs.length < ALIGN_CACHE_SEGMENTS) {
+		console.log(`[align] "${lastTrackTitle}" — ${segs.length} segments, too little evidence to cache`);
+		return;
+	}
+	const aligned = alignLyrics(lines, segs, trackLength, getTrackEnergy());
+	if (aligned.length < 3) return;
+	saveAlignedLyrics(lastTrackArtist || undefined, lastTrackTitle, aligned);
+	console.log(`[align] "${lastTrackTitle}" — cached ${aligned.length} synced lines from ${segs.length} segments (${source})`);
+}
+
+function maybeRunAlignment(): void {
+	if (!alignLines || alignSyncedSeen) return;
+	if (!win || win.isDestroyed()) return;
+	const now = Date.now();
+	if (now - alignLastRun < ALIGN_INTERVAL) return;
+	alignLastRun = now;
+	const segs = getTrackSegments();
+	if (segs.length < ALIGN_MIN_SEGMENTS) return;
+	const aligned = alignLyrics(alignLines, segs, trackLength, getTrackEnergy());
+	if (!aligned.length) return;
+	console.log(`[align] live: ${aligned.length} lines over ${segs.length} segments`);
+	win.webContents.send("lyrics", {
+		lyrics: { lines: aligned, synchronized: true },
+		source: "aura-align"
+	});
+}
 
 function isPlaying(status: string | null | undefined): boolean {
 	if (!status) return false;
@@ -102,6 +168,13 @@ function launchLyricsLookup(id: string, title?: string, artist?: string, duratio
 		if (!win || win.isDestroyed() || lastTrackId !== id || token !== lyricsJobToken) return;
 		const result = outcome.result;
 		lyricsFromLrclib = !!result && result.source === "Lrclib";
+		if (result && !result.synchronized && !result.instrumental && result.lines.length) {
+			// plain text is all we have — align it live against vocal segments
+			enterAlignment(result.lines, result.source, true);
+		} else {
+			alignSyncedSeen = !!result && result.synchronized;
+			stopAlignment();
+		}
 		console.log(`[lyrics] "${title}" — ${artist || "?"} (dur=${Math.round(duration || 0)}s): ${result ? (result.instrumental ? `${result.source} (instrumental)` : `${result.source} (${result.synchronized ? "synced" : "plain"}, ${result.lines.length} lines)`) : "not found anywhere"}${outcome.lrclibPending ? " [lrclib pending — pursuing in background]" : ""}${outcome.lrclibVerify ? " [lrclib re-check scheduled]" : ""}`);
 		win.webContents.send("lyrics", {
 			lyrics: result ? { lines: result.lines, synchronized: result.synchronized, instrumental: result.instrumental || undefined } : null,
@@ -114,6 +187,8 @@ function launchLyricsLookup(id: string, title?: string, artist?: string, duratio
 				if (!upgrade) return; // fallback stands (cached where definitive)
 				if (!win || win.isDestroyed() || lastTrackId !== id || token !== lyricsJobToken) return;
 				lyricsFromLrclib = true;
+				alignSyncedSeen = true;
+				stopAlignment();
 				console.log(`[lyrics] "${title}" — ${artist || "?"}: Lrclib late upgrade (${upgrade.instrumental ? "instrumental" : `${upgrade.synchronized ? "synced" : "plain"}, ${upgrade.lines.length} lines`})`);
 				win.webContents.send("lyrics", {
 					lyrics: { lines: upgrade.lines, synchronized: upgrade.synchronized, instrumental: upgrade.instrumental || undefined },
@@ -129,6 +204,8 @@ function launchLyricsLookup(id: string, title?: string, artist?: string, duratio
 				if (!upgrade) return; // the "no" was real — Genius verdict stands
 				if (!win || win.isDestroyed() || lastTrackId !== id || token !== lyricsJobToken) return;
 				lyricsFromLrclib = true;
+				alignSyncedSeen = true;
+				stopAlignment();
 				console.log(`[lyrics] "${title}" — ${artist || "?"}: Lrclib re-check upgrade (${upgrade.instrumental ? "instrumental" : `${upgrade.synchronized ? "synced" : "plain"}, ${upgrade.lines.length} lines`})`);
 				win.webContents.send("lyrics", {
 					lyrics: { lines: upgrade.lines, synchronized: upgrade.synchronized, instrumental: upgrade.instrumental || undefined },
@@ -147,6 +224,9 @@ async function handleUpdate(update: Update | null): Promise<void> {
 		// only declare "nothing playing" after a few consecutive empties
 		nullStreak++;
 		if (lastTrackId !== null && nullStreak >= 3) {
+			finalizeAlignment();
+			beginTrack();
+			alignSyncedSeen = false;
 			lastTrackId = null;
 			lastStatus = null;
 			lastTrackTitle = undefined;
@@ -167,6 +247,9 @@ async function handleUpdate(update: Update | null): Promise<void> {
 		: null;
 
 	if (id !== lastTrackId) {
+		finalizeAlignment();
+		beginTrack();
+		alignSyncedSeen = false;
 		lastTrackId = id;
 		lastStatus = null;
 		lastTrackTitle = update.metadata.title;
@@ -204,6 +287,10 @@ async function handleUpdate(update: Update | null): Promise<void> {
 					const parsed = parseLrc(decodeLrcBuffer(fs.readFileSync(track.lrcPath)));
 					lyrics = { lines: parsed.lines, synchronized: parsed.synchronized };
 					lrcSource = path.basename(track.lrcPath);
+					if (parsed.synchronized) alignSyncedSeen = true;
+					// unsynced local .lrc — align live too, but never cache
+					// over the user's own file
+					else if (parsed.lines.length) enterAlignment(parsed.lines, lrcSource, false);
 				} catch (_e) {
 					// unreadable .lrc — report as not found
 				}
@@ -450,6 +537,9 @@ app.whenReady().then(async () => {
 	createWindow();
 	initUpdater(() => win);
 
+	// loopback capture + vocal DSP — dev only, never in the packaged app
+	if (!app.isPackaged) startLoopback();
+
 	watcher = new MediaWatcher(async () => {
 		await handleUpdate(await watcher!.getUpdate());
 	});
@@ -466,6 +556,10 @@ app.whenReady().then(async () => {
 				// timeline update — raw update.elapsed is stale between those
 				// and makes the lyrics jitter back and forth
 				const position = await watcher.getPosition();
+				// Stage 2: pair the capture clock with the track clock and
+				// re-align plain lyrics as vocal evidence accumulates
+				noteTrackPosition(position);
+				maybeRunAlignment();
 				if (win && !win.isDestroyed()) {
 					win.webContents.send("position", {
 						position,
@@ -484,4 +578,9 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
 	app.quit();
+});
+
+app.on("will-quit", () => {
+	finalizeAlignment();
+	stopLoopback();
 });

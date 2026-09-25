@@ -4,6 +4,7 @@ node_modules/
 # build output
 dist/
 targets/
+native/loopback/build/
 
 # local config (real one lives in %APPDATA%/aura)
 config.json
@@ -13,3 +14,4 @@ config.json
 .DS_Store
 Thumbs.db
 .qwen/
+.qwen-*
