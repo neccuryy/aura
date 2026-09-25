@@ -518,6 +518,44 @@ api.onFullscreen((data) => {
 	document.body.classList.toggle("fullscreen", !!data);
 });
 
+/* ---------- auto-update ---------- */
+
+// the packaged app checks GitHub Releases on start; when a newer version
+// is out, a pulsing download button appears in the side panel — clicking
+// it downloads the update (percent shown right in the button) and
+// relaunches the app on the new version
+el.btnUpdate = document.getElementById("btn-update");
+el.updateIcon = el.btnUpdate.querySelector("svg");
+
+el.btnUpdate.addEventListener("click", () => {
+	if (el.btnUpdate.classList.contains("downloading")) return;
+	el.btnUpdate.classList.add("downloading");
+	el.btnUpdate.title = "Скачивается обновление…";
+	api.downloadUpdate();
+});
+
+api.onUpdateAvailable((data) => {
+	if (el.btnUpdate.classList.contains("downloading")) return;
+	el.btnUpdate.classList.remove("hidden");
+	el.btnUpdate.title = `Доступна версия ${data && data.version ? data.version : "новее"} — скачать`;
+});
+
+api.onUpdateProgress((data) => {
+	if (!el.btnUpdate.classList.contains("downloading")) {
+		el.btnUpdate.classList.add("downloading");
+	}
+	const percent = data && typeof data.percent === "number" ? data.percent : 0;
+	if (percent > 0) {
+		el.updateIcon.classList.add("hidden");
+		el.btnUpdate.textContent = `${percent}%`;
+	}
+});
+
+api.onUpdateInstalling(() => {
+	el.btnUpdate.textContent = "…";
+	el.btnUpdate.title = "Устанавливается — приложение перезапустится";
+});
+
 /* ---------- lyrics source badge ---------- */
 
 // the badge above the cover stays invisible; hovering the cover (or the

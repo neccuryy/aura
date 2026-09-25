@@ -35,7 +35,17 @@ const api = {
 		ipcRenderer.send("titlebar", { color, symbolColor }),
 	onFullscreen: (cb: (data: unknown) => void): void => {
 		ipcRenderer.on("fullscreen", (_e, data) => cb(data));
-	}
+	},
+	onUpdateAvailable: (cb: (data: unknown) => void): void => {
+		ipcRenderer.on("update-available", (_e, data) => cb(data));
+	},
+	onUpdateProgress: (cb: (data: unknown) => void): void => {
+		ipcRenderer.on("update-progress", (_e, data) => cb(data));
+	},
+	onUpdateInstalling: (cb: () => void): void => {
+		ipcRenderer.on("update-installing", (_e) => cb());
+	},
+	downloadUpdate: (): void => ipcRenderer.send("update:download")
 };
 
 contextBridge.exposeInMainWorld("aura", api);

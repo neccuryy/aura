@@ -1,5 +1,9 @@
 appId: xyz.aura.app
 productName: aura
+publish:
+  provider: github
+  owner: neccuryy
+  repo: aura
 directories:
   output: targets
 files:
@@ -21,3 +25,7 @@ win:
     - nsis
     - zip
   icon: assets/icon.png
+nsis:
+  # must match the url field in latest.yml — GitHub release assets are
+  # looked up by this exact name by electron-updater
+  artifactName: aura-Setup-${version}.exe

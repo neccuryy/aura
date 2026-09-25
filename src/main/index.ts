@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import type { Update, Capabilities } from "winplayer-node";
 import { MediaWatcher } from "./watcher";
+import { initUpdater } from "./updater";
 import { loadConfig, saveConfig, AuraConfig } from "./config";
 import { buildIndex, findTrack, LibraryIndex } from "./library";
 import { parseLrc, decodeLrcBuffer } from "./lrc";
@@ -447,6 +448,7 @@ app.whenReady().then(async () => {
 	config = loadConfig();
 	registerIpc();
 	createWindow();
+	initUpdater(() => win);
 
 	watcher = new MediaWatcher(async () => {
 		await handleUpdate(await watcher!.getUpdate());
