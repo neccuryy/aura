@@ -1,5 +1,5 @@
 import * as https from "https";
-import { normTitle, looseMatch, titleMatch, stripBrackets, translit } from "./cover";
+import { normTitle, looseMatch, titleMatch, stripBrackets, translit, dropMaskedWords } from "./cover";
 import type { OnlineLyrics } from "./lrclib";
 
 // Genius: the official API returns metadata only — the lyrics themselves
@@ -79,10 +79,17 @@ function extractLyricsHtml(pageHtml: string): string | null {
 	);
 	if (!m) return null;
 	try {
-		// the captured text is a JS single-quoted string body: JSON escapes
-		// plus \' — normalize \' away, then unescape via a JSON string parse
-		const captured = m[1].replace(/\\'/g, "'");
-		const inner = JSON.parse('"' + captured + '"');
+		// the captured text is the body of a JS single-quoted string literal.
+		// Besides JSON escapes it can carry JS-only ones — e.g. \` for a
+		// backtick inside "larl`a" — which are invalid in JSON. Unescape with
+		// full JS string semantics, then parse the inner JSON text directly.
+		const JS_ESCAPES: Record<string, string> = {
+			n: "\n", t: "\t", r: "\r", b: "\b", f: "\f"
+		};
+		const inner = m[1].replace(/\\(u[0-9a-fA-F]{4}|[\s\S])/g, (_match, seq: string) => {
+			if (seq.length === 5) return String.fromCharCode(parseInt(seq.slice(1), 16));
+			return JS_ESCAPES[seq] ?? seq;
+		});
 		const state = JSON.parse(inner);
 		const html = state?.songPage?.lyricsData?.body?.html;
 		return typeof html === "string" ? html : null;
@@ -138,10 +145,19 @@ export async function getGeniusLyrics(
 	const queries: string[] = [];
 	if (artist) {
 		queries.push(`${cleanTitle} ${artist}`);
+		// comma-joined artist lists ("A, B") poison the search — Genius
+		// matches on the full string and returns garbage; retry with the
+		// first artist only
+		const firstArtist = artist.split(",")[0].trim();
+		if (firstArtist && firstArtist !== artist) queries.push(`${cleanTitle} ${firstArtist}`);
 		const ta = translit(artist);
 		if (ta && ta !== artist) {
 			queries.push(`${cleanTitle} ${ta}`, ta);
 		}
+		// censored words ("Х*ярю") return zero hits — retry without them;
+		// pickHit still verifies the hit via the masked titleMatch fallback
+		const unmasked = dropMaskedWords(cleanTitle);
+		if (unmasked && unmasked !== cleanTitle) queries.push(`${unmasked} ${artist}`);
 	} else {
 		queries.push(cleanTitle);
 	}
@@ -170,7 +186,9 @@ export async function getGeniusLyrics(
 			Accept: "text/html"
 		});
 		if (!page) return { result: null, definitive: false };
-		if (page.status !== 200) return { result: null, definitive: true };
+		// a non-200 page (rate limit, 5xx) says nothing about whether the
+		// lyrics exist — don't negative-cache on it
+		if (page.status !== 200) return { result: null, definitive: false };
 
 		const lyricsHtml = extractLyricsHtml(page.body);
 		if (!lyricsHtml) return { result: null, definitive: true };

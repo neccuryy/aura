@@ -7,6 +7,12 @@ const cases = [
 	["тот день", "тот день, когда я ушёл", false],
 	["Говорят чо", "Говорят чо", true],
 	["NANANANA", "NaNaNa", false],
+	// ё/е: player reports ё, Genius stores е
+	["гайд на ограбление пятёрочки", "гайд на ограбление пятерочки (GTRP)", true],
+	// censored title vs uncensored Genius title
+	["Х*ярю якобс монарх", "Хуярю якобс монарх (Drink Jacobs Monarch)", true],
+	// masked fallback must not loosen unrelated titles
+	["тот день", "тот день, когда я ушёл*", false],
 ];
 
 for (const [a, b, want] of cases) {

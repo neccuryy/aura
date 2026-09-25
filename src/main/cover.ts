@@ -81,8 +81,10 @@ function fetchBuffer(url: string): Promise<Buffer> {
 // search APIs return random popular songs for obscure queries — a wrong
 // cover is worse than no cover, so only accept results that actually match
 // the playing track
+// ё and е are the same letter to any Russian speaker, but Genius often stores
+// titles with е where the player reports ё ("пятёрочки"/"пятерочки")
 export function norm(s: string | undefined | null): string {
-	return (s || "").toLowerCase().replace(/[^a-z0-9а-яё]+/gi, " ").trim();
+	return (s || "").toLowerCase().replace(/ё/g, "е").replace(/[^a-z0-9а-я]+/gi, " ").trim();
 }
 
 // players and online DBs append bracketed annotations the other side doesn't
@@ -124,6 +126,27 @@ export function looseMatch(a: string | undefined | null, b: string | undefined |
 	return na.includes(nb) || nb.includes(na);
 }
 
+// players censor some words with * $ @ # — Genius stores the uncensored
+// title, so a masked word never matches. Drop masked words from BOTH sides
+// and compare what's left. Titles only — artists like "$uicideboy$" would
+// be emptied by this.
+const MASK_CHARS = /[*@$#]/;
+
+export function dropMaskedWords(s: string | undefined | null): string {
+	const words = (s || "").trim().split(/\s+/).filter((w) => w && !MASK_CHARS.test(w));
+	return words.join(" ").trim();
+}
+
+function maskedTitleMatch(a: string | undefined | null, b: string | undefined | null): boolean {
+	const na = norm(dropMaskedWords(stripBrackets(a)));
+	const nb = norm(dropMaskedWords(stripBrackets(b)));
+	if (!na || !nb) return false;
+	if (na === nb) return true;
+	const shorter = na.length < nb.length ? na : nb;
+	const longer = na.length < nb.length ? nb : na;
+	return longer.includes(shorter) && shorter.length >= longer.length * 0.65;
+}
+
 // inclusion only counts for comparable-length titles — "тот день" must
 // not pass as a match for "тот день, когда я ушёл"
 export function titleMatch(a: string | undefined | null, b: string | undefined | null): boolean {
@@ -132,7 +155,12 @@ export function titleMatch(a: string | undefined | null, b: string | undefined |
 	if (na === nb) return true;
 	const shorter = na.length < nb.length ? na : nb;
 	const longer = na.length < nb.length ? nb : na;
-	return longer.includes(shorter) && shorter.length >= longer.length * 0.65;
+	if (longer.includes(shorter) && shorter.length >= longer.length * 0.65) return true;
+	// censored title on one side — retry with masked words dropped
+	if (MASK_CHARS.test(a || "") || MASK_CHARS.test(b || "")) {
+		return maskedTitleMatch(a, b);
+	}
+	return false;
 }
 
 async function fromItunes(title: string, artist: string): Promise<string | null> {

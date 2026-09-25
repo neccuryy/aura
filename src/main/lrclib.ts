@@ -301,7 +301,9 @@ export async function lookupLyrics(
 	return { result: geniusResult, lrclibPending: false, lrclibVerify: !!geniusResult };
 }
 
-const PURSUE_DELAYS = [15000, 30000, 60000, 120000, 300000];
+// first retry almost immediately — a transient 429/timeout often clears at
+// once, so the Genius→Lrclib upgrade lands within seconds — then back off
+const PURSUE_DELAYS = [2000, 15000, 30000, 60000, 120000, 300000];
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -338,7 +340,7 @@ export async function pursueLrclib(
 	onResolved(null);
 }
 
-const VERIFY_DELAY = 20000;
+const VERIFY_DELAY = 10000;
 
 // Lrclib answered a definitive "no" but that answer sometimes flakes
 // (e.g. search returning an empty array with 200). One delayed re-check:

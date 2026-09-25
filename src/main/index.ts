@@ -114,7 +114,7 @@ function launchLyricsLookup(id: string, title?: string, artist?: string, duratio
 				if (!upgrade) return; // fallback stands (cached where definitive)
 				if (!win || win.isDestroyed() || lastTrackId !== id || token !== lyricsJobToken) return;
 				lyricsFromLrclib = true;
-				console.log(`[lyrics] "${title}" — ${artist || "?"}: Lrclib late upgrade (${upgrade.instrumental ? "instrumental" : `synced, ${upgrade.lines.length} lines`})`);
+				console.log(`[lyrics] "${title}" — ${artist || "?"}: Lrclib late upgrade (${upgrade.instrumental ? "instrumental" : `${upgrade.synchronized ? "synced" : "plain"}, ${upgrade.lines.length} lines`})`);
 				win.webContents.send("lyrics", {
 					lyrics: { lines: upgrade.lines, synchronized: upgrade.synchronized, instrumental: upgrade.instrumental || undefined },
 					source: upgrade.source
@@ -129,7 +129,7 @@ function launchLyricsLookup(id: string, title?: string, artist?: string, duratio
 				if (!upgrade) return; // the "no" was real — Genius verdict stands
 				if (!win || win.isDestroyed() || lastTrackId !== id || token !== lyricsJobToken) return;
 				lyricsFromLrclib = true;
-				console.log(`[lyrics] "${title}" — ${artist || "?"}: Lrclib re-check upgrade (${upgrade.instrumental ? "instrumental" : `synced, ${upgrade.lines.length} lines`})`);
+				console.log(`[lyrics] "${title}" — ${artist || "?"}: Lrclib re-check upgrade (${upgrade.instrumental ? "instrumental" : `${upgrade.synchronized ? "synced" : "plain"}, ${upgrade.lines.length} lines`})`);
 				win.webContents.send("lyrics", {
 					lyrics: { lines: upgrade.lines, synchronized: upgrade.synchronized, instrumental: upgrade.instrumental || undefined },
 					source: upgrade.source
