@@ -9,9 +9,9 @@ import { buildIndex, findTrack, LibraryIndex } from "./library";
 import { parseLrc, decodeLrcBuffer } from "./lrc";
 import { extractPalette } from "./palette";
 import { getFallbackCover, artWidth } from "./cover";
-import { lookupLyrics, pursueLrclib, verifyLrclib, clearLyricsCache, saveAlignedLyrics } from "./lrclib";
-import { startLoopback, stopLoopback, beginTrack, noteTrackPosition, getTrackSegments, getTrackEnergy } from "./loopback";
-import { alignLyrics } from "./align";
+import { lookupLyrics, pursueLrclib, verifyLrclib, clearLyricsCache, saveAlignedLyrics, lyricsCacheStats, clearAllLyricsCache } from "./lrclib";
+import { startLoopback, stopLoopback, beginTrack, noteTrackPosition, getTrackSegments, getTrackEnergy, checkLoopbackWatchdog } from "./loopback";
+import { alignLyrics, AlignStats, AnchorLocker } from "./align";
 
 interface TrackPayload {
 	empty: boolean;
@@ -62,21 +62,101 @@ let alignCacheable = false;   // online-sourced — the aligned result may be ca
 let alignSyncedSeen = false;  // a synced version was delivered — alignment off
 let alignLastRun = 0;         // throttle for live re-alignment
 
+// Anchor Locking (план item 4): passed lines with a stable segment binding
+// freeze — later DP runs solve only the remainder, so the highlight never
+// jumps back into played text
+const alignLocker = new AnchorLocker();
+
 const ALIGN_INTERVAL = 5000;      // ms between live re-alignments
-const ALIGN_MIN_SEGMENTS = 2;     // live: don't align before this much evidence
+const ALIGN_MIN_SEGMENTS = 1;     // live: energy-dip splitting supplies the
+                                  // granularity — one raw VAD block is enough
 const ALIGN_CACHE_SEGMENTS = 3;   // cache: minimum evidence to persist
+
+// Source switcher ("< AURA >"): every lyrics source discovered for the
+// current track (local .lrc, Lrclib, Genius, live/cached "aura" alignment)
+// is registered here and offered to the renderer; a manual selection owns
+// the screen until the track changes — automatic updates (late Lrclib
+// upgrades, live alignment ticks) only refresh the candidate list then.
+interface SourceEntry {
+	id: string;          // "local" | "Lrclib" | "Genius" | "aura"
+	name: string;        // badge label (file name for a local .lrc)
+	status: "pending" | "ready";
+	synchronized: boolean;
+	instrumental?: boolean;
+	lines: { text: string; time: number }[] | null; // null while pending
+}
+let sourceEntries: SourceEntry[] = [];
+let sourcesSettled = false;        // initial search finished — arrows may show
+let manualSource: string | null = null; // user-forced display, until track change
+let autoSourceId: string | null = null; // what the automatic flow last displayed
+
+function resetSources(): void {
+	sourceEntries = [];
+	sourcesSettled = false;
+	manualSource = null;
+	autoSourceId = null;
+	broadcastSources();
+}
+
+function upsertSource(entry: SourceEntry): void {
+	const i = sourceEntries.findIndex((s) => s.id === entry.id);
+	if (i >= 0) sourceEntries[i] = entry;
+	else sourceEntries.push(entry);
+	broadcastSources();
+}
+
+// stopAlignment kills the live "aura" source — any pending or ready entry
+// (a ready one can be stale: a retry replaced the text it was aligned to).
+// A cached "aura" verdict is upserted AFTER stopAlignment, so it survives.
+function dropAuraSource(): void {
+	const i = sourceEntries.findIndex((s) => s.id === "aura");
+	if (i < 0) return;
+	sourceEntries.splice(i, 1);
+	if (manualSource === "aura") manualSource = null;
+	broadcastSources();
+}
+
+function broadcastSources(): void {
+	if (!win || win.isDestroyed()) return;
+	win.webContents.send("sources", {
+		entries: sourceEntries.map((s) => ({
+			id: s.id,
+			name: s.name,
+			status: s.status,
+			synchronized: s.synchronized
+		})),
+		current: manualSource || autoSourceId,
+		settled: sourcesSettled
+	});
+}
+
+// gated "lyrics" send: with a manual selection active, an automatic update
+// for a DIFFERENT source must not steal the screen (an update for the
+// selected source — e.g. live aura ticks while "aura" is selected — flows)
+function displayLyricsEvent(id: string | null, source: string | null, lyrics: TrackPayload["lyrics"]): void {
+	if (manualSource && id !== manualSource) return;
+	if (id) autoSourceId = id;
+	if (!win || win.isDestroyed()) return;
+	win.webContents.send("lyrics", { lyrics, source });
+}
 
 function enterAlignment(lines: { text: string }[], source: string, cacheable: boolean): void {
 	alignLines = lines;
 	alignSource = source;
 	alignCacheable = cacheable;
 	alignLastRun = 0;
+	alignLocker.reset();
+	// the live alignment is a switchable source — pending until its first
+	// output, ready from then on
+	upsertSource({ id: "aura", name: "aura", status: "pending", synchronized: false, lines: null });
 }
 
 function stopAlignment(): void {
 	alignLines = null;
 	alignSource = null;
 	alignCacheable = false;
+	alignLocker.reset();
+	dropAuraSource();
 }
 
 // track ended (switch or stop) — persist the alignment if it's worth
@@ -92,27 +172,49 @@ function finalizeAlignment(): void {
 		console.log(`[align] "${lastTrackTitle}" — ${segs.length} segments, too little evidence to cache`);
 		return;
 	}
-	const aligned = alignLyrics(lines, segs, trackLength, getTrackEnergy());
+	const stats: Partial<AlignStats> = {};
+	const aligned = alignLyrics(lines, segs, trackLength, getTrackEnergy(), stats);
 	if (aligned.length < 3) return;
-	saveAlignedLyrics(lastTrackArtist || undefined, lastTrackTitle, aligned);
-	console.log(`[align] "${lastTrackTitle}" — cached ${aligned.length} synced lines from ${segs.length} segments (${source})`);
+	// quality gate: a partial listen (track skipped early) produces a
+	// garbage alignment that would poison the cache for every future play.
+	// progress — how far into the track the vocal evidence reaches;
+	// coverage — heard vocal time vs the expected sung duration
+	const heard = segs.reduce((s, g) => s + (g.end - g.start), 0);
+	const lastEnd = segs.reduce((m, g) => Math.max(m, g.end), 0);
+	const progress = trackLength > 0 ? lastEnd / trackLength : 1;
+	const coverage = stats.expected ? heard / stats.expected : 1;
+	if (progress < 0.75 || coverage < 0.4) {
+		console.log(`[align] "${lastTrackTitle}" — quality gate: progress ${(progress * 100).toFixed(0)}%, coverage ${(coverage * 100).toFixed(0)}% — partial listen, not cached`);
+		return;
+	}
+	const wrote = saveAlignedLyrics(lastTrackArtist || undefined, lastTrackTitle, aligned);
+	if (wrote) {
+		console.log(`[align] "${lastTrackTitle}" — cached ${aligned.length} synced lines (${source})`);
+	} else {
+		console.log(`[align] "${lastTrackTitle}" — kept existing synced cache, local alignment discarded`);
+	}
+	console.log(`[align] cache stats: rate ${stats.rate} ms/syll, anchored ${stats.anchored}/${aligned.length}, interp ${stats.interpolated}, segs used ${stats.segsUsed}/${stats.segsUsed! + stats.segsSkipped!}, cost ${stats.cost?.toFixed(1)}`);
+	console.log(`[align] cache times: ${aligned.map((l) => l.time.toFixed(1)).join(", ")}s`);
 }
 
-function maybeRunAlignment(): void {
+function maybeRunAlignment(position: number): void {
 	if (!alignLines || alignSyncedSeen) return;
 	if (!win || win.isDestroyed()) return;
 	const now = Date.now();
 	if (now - alignLastRun < ALIGN_INTERVAL) return;
 	alignLastRun = now;
+	alignLocker.onClock(position, now);
 	const segs = getTrackSegments();
 	if (segs.length < ALIGN_MIN_SEGMENTS) return;
-	const aligned = alignLyrics(alignLines, segs, trackLength, getTrackEnergy());
+	const stats: Partial<AlignStats> = {};
+	const aligned = alignLyrics(alignLines, segs, trackLength, getTrackEnergy(), stats, position, alignLocker.current);
 	if (!aligned.length) return;
-	console.log(`[align] live: ${aligned.length} lines over ${segs.length} segments`);
-	win.webContents.send("lyrics", {
-		lyrics: { lines: aligned, synchronized: true },
-		source: "aura-align"
-	});
+	alignLocker.update(position, aligned, stats);
+	const locked = alignLocker.current ? alignLocker.current.lineIdx + 1 : 0;
+	console.log(`[align] live @ ${position.toFixed(1)}s: ${aligned.length} lines over ${segs.length} segs (refined ${stats.refined?.length ?? "?"}) — rate ${stats.rate} ms/syll, anchored ${stats.anchored}, interp ${stats.interpolated}, locked ${locked}, segs used ${stats.segsUsed} skipped ${stats.segsSkipped}, cost ${stats.cost?.toFixed(1)}`);
+	console.log(`[align] times: ${aligned.map((l) => l.time.toFixed(1)).join(", ")}s`);
+	upsertSource({ id: "aura", name: "aura", status: "ready", synchronized: true, lines: aligned });
+	displayLyricsEvent("aura", "aura", { lines: aligned, synchronized: true });
 }
 
 function isPlaying(status: string | null | undefined): boolean {
@@ -160,7 +262,9 @@ function launchLyricsLookup(id: string, title?: string, artist?: string, duratio
 	if (!title) {
 		// nothing to search online — report the miss immediately
 		if (win && !win.isDestroyed() && lastTrackId === id && token === lyricsJobToken) {
-			win.webContents.send("lyrics", { lyrics: null, source: null });
+			sourcesSettled = true;
+			broadcastSources();
+			displayLyricsEvent(null, null, null);
 		}
 		return;
 	}
@@ -175,11 +279,42 @@ function launchLyricsLookup(id: string, title?: string, artist?: string, duratio
 			alignSyncedSeen = !!result && result.synchronized;
 			stopAlignment();
 		}
+		// register every source the pipeline found as a switchable candidate
+		// (after enterAlignment/stopAlignment, so a cached "aura" verdict
+		// isn't dropped as a pending live alignment)
+		for (const cand of outcome.candidates) {
+			upsertSource({
+				id: cand.source,
+				name: cand.source,
+				status: "ready",
+				synchronized: cand.synchronized,
+				instrumental: cand.instrumental,
+				lines: cand.lines
+			});
+		}
+		sourcesSettled = true;
+		broadcastSources();
+		// cache hit (e.g. a saved aura alignment): the display shows the
+		// cached verdict instantly; a read-only background re-search
+		// recovers the other sources for the switcher — arrows appear as
+		// they land, the screen stays on the cached version
+		if (outcome.fromCache && result) {
+			void lookupLyrics(title, artist || undefined, duration || undefined, config.geniusToken, strict, true).then((fresh) => {
+				if (!win || win.isDestroyed() || lastTrackId !== id || token !== lyricsJobToken) return;
+				for (const cand of fresh.candidates) {
+					upsertSource({
+						id: cand.source,
+						name: cand.source,
+						status: "ready",
+						synchronized: cand.synchronized,
+						instrumental: cand.instrumental,
+						lines: cand.lines
+					});
+				}
+			});
+		}
 		console.log(`[lyrics] "${title}" — ${artist || "?"} (dur=${Math.round(duration || 0)}s): ${result ? (result.instrumental ? `${result.source} (instrumental)` : `${result.source} (${result.synchronized ? "synced" : "plain"}, ${result.lines.length} lines)`) : "not found anywhere"}${outcome.lrclibPending ? " [lrclib pending — pursuing in background]" : ""}${outcome.lrclibVerify ? " [lrclib re-check scheduled]" : ""}`);
-		win.webContents.send("lyrics", {
-			lyrics: result ? { lines: result.lines, synchronized: result.synchronized, instrumental: result.instrumental || undefined } : null,
-			source: result ? result.source : null
-		});
+		displayLyricsEvent(result ? result.source : null, result ? result.source : null, result ? { lines: result.lines, synchronized: result.synchronized, instrumental: result.instrumental || undefined } : null);
 		if (outcome.lrclibPending) {
 			// Lrclib answered transiently — keep retrying it in the background;
 			// when it finally answers, upgrade the display to the synced version
@@ -190,10 +325,15 @@ function launchLyricsLookup(id: string, title?: string, artist?: string, duratio
 				alignSyncedSeen = true;
 				stopAlignment();
 				console.log(`[lyrics] "${title}" — ${artist || "?"}: Lrclib late upgrade (${upgrade.instrumental ? "instrumental" : `${upgrade.synchronized ? "synced" : "plain"}, ${upgrade.lines.length} lines`})`);
-				win.webContents.send("lyrics", {
-					lyrics: { lines: upgrade.lines, synchronized: upgrade.synchronized, instrumental: upgrade.instrumental || undefined },
-					source: upgrade.source
+				upsertSource({
+					id: upgrade.source,
+					name: upgrade.source,
+					status: "ready",
+					synchronized: upgrade.synchronized,
+					instrumental: upgrade.instrumental,
+					lines: upgrade.lines
 				});
+				displayLyricsEvent(upgrade.source, upgrade.source, { lines: upgrade.lines, synchronized: upgrade.synchronized, instrumental: upgrade.instrumental || undefined });
 			});
 			return;
 		}
@@ -207,10 +347,15 @@ function launchLyricsLookup(id: string, title?: string, artist?: string, duratio
 				alignSyncedSeen = true;
 				stopAlignment();
 				console.log(`[lyrics] "${title}" — ${artist || "?"}: Lrclib re-check upgrade (${upgrade.instrumental ? "instrumental" : `${upgrade.synchronized ? "synced" : "plain"}, ${upgrade.lines.length} lines`})`);
-				win.webContents.send("lyrics", {
-					lyrics: { lines: upgrade.lines, synchronized: upgrade.synchronized, instrumental: upgrade.instrumental || undefined },
-					source: upgrade.source
+				upsertSource({
+					id: upgrade.source,
+					name: upgrade.source,
+					status: "ready",
+					synchronized: upgrade.synchronized,
+					instrumental: upgrade.instrumental,
+					lines: upgrade.lines
 				});
+				displayLyricsEvent(upgrade.source, upgrade.source, { lines: upgrade.lines, synchronized: upgrade.synchronized, instrumental: upgrade.instrumental || undefined });
 			});
 		}
 	});
@@ -227,6 +372,7 @@ async function handleUpdate(update: Update | null): Promise<void> {
 			finalizeAlignment();
 			beginTrack();
 			alignSyncedSeen = false;
+			resetSources();
 			lastTrackId = null;
 			lastStatus = null;
 			lastTrackTitle = undefined;
@@ -260,6 +406,7 @@ async function handleUpdate(update: Update | null): Promise<void> {
 		lyricsLaunchedFor = null;
 		lyricsJobToken++;
 		coverJobToken++;
+		resetSources();
 		// SMTC artwork often arrives after the metadata — give it time
 		// before resorting to an online cover search
 		coverDeadline = Date.now() + 2000;
@@ -287,6 +434,11 @@ async function handleUpdate(update: Update | null): Promise<void> {
 					const parsed = parseLrc(decodeLrcBuffer(fs.readFileSync(track.lrcPath)));
 					lyrics = { lines: parsed.lines, synchronized: parsed.synchronized };
 					lrcSource = path.basename(track.lrcPath);
+					// local .lrc matched — no online search will run for this
+					// track, so the source list is settled right away
+					sourcesSettled = true;
+					autoSourceId = "local";
+					upsertSource({ id: "local", name: lrcSource, status: "ready", synchronized: parsed.synchronized, lines: parsed.lines });
 					if (parsed.synchronized) alignSyncedSeen = true;
 					// unsynced local .lrc — align live too, but never cache
 					// over the user's own file
@@ -473,6 +625,25 @@ function registerIpc(): void {
 		return libraryStats();
 	});
 
+	ipcMain.handle("cache:stats", () => lyricsCacheStats());
+
+	// settings: wipe the whole lyrics cache. The current track's verdict is
+	// gone too — when its text came from the online chain, restart the whole
+	// lookup from scratch (a local .lrc track is untouched by the cache, its
+	// text stays)
+	ipcMain.handle("cache:clear", () => {
+		clearAllLyricsCache();
+		if (lastTrackId && lastTrackTitle && lyricsLaunchedFor === lastTrackId) {
+			manualSource = null;
+			sourcesSettled = false;
+			broadcastSources();
+			lyricsJobToken++;
+			lyricsLaunchedFor = null;
+			launchLyricsLookup(lastTrackId, lastTrackTitle, lastTrackArtist, trackLength, false);
+		}
+		return lyricsCacheStats();
+	});
+
 	ipcMain.on("control", (_e, action: string) => {
 		if (!watcher) return;
 		if (action === "playpause") watcher.playPause();
@@ -505,6 +676,10 @@ function registerIpc(): void {
 	ipcMain.on("lyrics:wrong", () => {
 		if (!lastTrackId || !lastTrackTitle) return;
 		clearLyricsCache(lastTrackArtist || undefined, lastTrackTitle);
+		// re-search = back to the automatic source choice
+		manualSource = null;
+		sourcesSettled = false;
+		broadcastSources();
 		lyricsJobToken++;
 		lyricsLaunchedFor = null;
 		launchLyricsLookup(lastTrackId, lastTrackTitle, lastTrackArtist, trackLength, true);
@@ -515,9 +690,26 @@ function registerIpc(): void {
 	ipcMain.on("lyrics:retry", () => {
 		if (!lastTrackId || !lastTrackTitle) return;
 		clearLyricsCache(lastTrackArtist || undefined, lastTrackTitle);
+		manualSource = null;
+		sourcesSettled = false;
+		broadcastSources();
 		lyricsJobToken++;
 		lyricsLaunchedFor = null;
 		launchLyricsLookup(lastTrackId, lastTrackTitle, lastTrackArtist, trackLength, false);
+	});
+
+	// source switcher — force the displayed lyrics source; the choice owns
+	// the screen until the track changes (or a re-search resets it)
+	ipcMain.on("lyrics:select-source", (_e, id: unknown) => {
+		const entry = typeof id === "string" ? sourceEntries.find((s) => s.id === id) : undefined;
+		if (!entry || entry.status !== "ready" || !entry.lines) return;
+		manualSource = id as string;
+		if (!win || win.isDestroyed()) return;
+		win.webContents.send("lyrics", {
+			lyrics: { lines: entry.lines, synchronized: entry.synchronized, instrumental: entry.instrumental || undefined },
+			source: entry.name
+		});
+		broadcastSources();
 	});
 }
 
@@ -559,7 +751,10 @@ app.whenReady().then(async () => {
 				// Stage 2: pair the capture clock with the track clock and
 				// re-align plain lyrics as vocal evidence accumulates
 				noteTrackPosition(position);
-				maybeRunAlignment();
+				// revive the WASAPI capture if it silently died (device
+				// change / exclusive-mode takeover) while music plays
+				checkLoopbackWatchdog(isPlaying(update.status));
+				maybeRunAlignment(position);
 				if (win && !win.isDestroyed()) {
 					win.webContents.send("position", {
 						position,

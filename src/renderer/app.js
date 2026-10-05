@@ -21,6 +21,7 @@ const state = {
 	,libraryEmpty: false // remembered for the "not found" note after search
 	,lyricsOnline: false // current lyrics came from Lrclib/Genius (not a local .lrc)
 	,lyricsLocal: false  // current lyrics came from a local .lrc file
+	,sources: { entries: [], current: null, settled: false } // source switcher state
 };
 
 /* ---------- elements ---------- */
@@ -31,6 +32,10 @@ const el = {
 	coverWrap: document.getElementById("cover-wrap"),
 	coverPlaceholder: document.getElementById("cover-placeholder"),
 	lyricsSource: document.getElementById("lyrics-source"),
+	srcPrev: document.getElementById("src-prev"),
+	srcName: document.getElementById("src-name"),
+	srcNext: document.getElementById("src-next"),
+	srcSizer: document.getElementById("src-sizer"),
 	title: document.getElementById("track-title"),
 	artist: document.getElementById("track-artist"),
 	btnPrev: document.getElementById("btn-prev"),
@@ -50,7 +55,9 @@ const el = {
 	btnAddFolder: document.getElementById("btn-add-folder"),
 	btnReindex: document.getElementById("btn-reindex"),
 	btnCloseSettings: document.getElementById("btn-close-settings"),
-	indexStats: document.getElementById("index-stats")
+	indexStats: document.getElementById("index-stats"),
+	cacheStats: document.getElementById("cache-stats"),
+	btnClearCache: document.getElementById("btn-clear-cache")
 };
 
 /* ---------- helpers ---------- */
@@ -290,7 +297,7 @@ api.onTrack((data) => {
 	if (data.empty) {
 		el.title.textContent = "aura";
 		el.artist.textContent = "Запусти трек в любом плеере";
-		el.lyricsSource.textContent = "";
+		el.srcName.textContent = "";
 		state.lyricsOnline = false;
 		state.lyricsLocal = false;
 		refreshLyricsButtons();
@@ -340,13 +347,13 @@ api.onTrack((data) => {
 	state.libraryEmpty = !!data.libraryEmpty;
 	if (data.lyrics) {
 		// local .lrc matched — show it immediately, badge = file name
-		el.lyricsSource.textContent = data.lrcSource || "локальный .lrc";
+		el.srcName.textContent = data.lrcSource || "локальный .lrc";
 		state.lyricsOnline = false;
 		state.lyricsLocal = true;
 		renderLyrics(data.lyrics, data.libraryEmpty);
 	} else {
 		// online lookup is in flight — loader until the "lyrics" event lands
-		el.lyricsSource.textContent = "";
+		el.srcName.textContent = "";
 		state.lyricsOnline = false;
 		state.lyricsLocal = false;
 		showLyricsLoading();
@@ -359,12 +366,12 @@ api.onTrack((data) => {
 api.onLyrics((data) => {
 	if (!state.hasTrack) return;
 	if (data && data.lyrics) {
-		el.lyricsSource.textContent = data.source || "";
+		el.srcName.textContent = data.source || "";
 		state.lyricsOnline = data.source === "Lrclib" || data.source === "Genius";
 		state.lyricsLocal = false;
 		renderLyrics(data.lyrics, false);
 	} else {
-		el.lyricsSource.textContent = "";
+		el.srcName.textContent = "";
 		state.lyricsOnline = false;
 		state.lyricsLocal = false;
 		renderLyrics(null, state.libraryEmpty);
@@ -459,8 +466,28 @@ function renderSettings(stats) {
 		"В библиотеке: " + stats.trackCount + " треков, с текстами (.lrc): " + stats.lrcCount;
 }
 
+function fmtBytes(bytes) {
+	if (bytes < 1024) return bytes + " Б";
+	if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " КБ";
+	return (bytes / (1024 * 1024)).toFixed(1) + " МБ";
+}
+
+function renderCacheStats(stats) {
+	el.cacheStats.textContent =
+		stats.files + " " + plural(stats.files, ["файл", "файла", "файлов"]) + " · " + fmtBytes(stats.bytes);
+}
+
+function plural(n, forms) {
+	const n10 = n % 10;
+	const n100 = n % 100;
+	if (n10 === 1 && n100 !== 11) return forms[0];
+	if (n10 >= 2 && n10 <= 4 && (n100 < 10 || n100 >= 20)) return forms[1];
+	return forms[2];
+}
+
 el.btnSettings.addEventListener("click", async () => {
 	renderSettings(await api.getConfig());
+	renderCacheStats(await api.cacheStats());
 	el.settings.classList.remove("hidden");
 });
 
@@ -472,6 +499,16 @@ el.btnAddFolder.addEventListener("click", async () => {
 
 el.btnReindex.addEventListener("click", async () => {
 	renderSettings(await api.reindex());
+});
+
+el.btnClearCache.addEventListener("click", async () => {
+	renderCacheStats(await api.clearCache());
+	// the current track's verdict was wiped too — if its text came from the
+	// online chain, the whole lookup restarts; show the loader until it lands
+	if (state.hasTrack && !state.lyricsLocal) {
+		el.srcName.textContent = "";
+		showLyricsLoading();
+	}
 });
 
 el.settings.addEventListener("click", (e) => {
@@ -565,4 +602,55 @@ el.coverWrap.addEventListener("mouseenter", () => {
 });
 el.coverWrap.addEventListener("mouseleave", () => {
 	el.lyricsSource.classList.remove("visible");
+});
+
+/* ---------- source switcher ---------- */
+
+// "< AURA >" — arrows cycle through every lyrics source the main process
+// found for the track (local .lrc / Lrclib / Genius / aura alignment).
+// Arrows appear only after the search settled AND more than one source is
+// ready; sources that load late (after retries) join the list as they land.
+function readySources() {
+	return state.sources.entries.filter((e) => e.status === "ready");
+}
+
+function renderSourceSwitcher() {
+	const show = state.sources.settled && readySources().length > 1;
+	el.srcPrev.classList.toggle("hidden", !show);
+	el.srcNext.classList.toggle("hidden", !show);
+	// size the name slot by the longest source name (e.g. "GENIUS") so the
+	// arrows sit right next to it and never move on switching; names are
+	// never abbreviated — the slot always fits the longest one entirely
+	// (getBoundingClientRect is fractional; ceil + slack so rounding never
+	// clips the longest name)
+	let w = 0;
+	for (const e of state.sources.entries) {
+		el.srcSizer.textContent = e.name || "";
+		const tw = el.srcSizer.getBoundingClientRect().width;
+		if (tw > w) w = tw;
+	}
+	el.srcSizer.textContent = "";
+	el.srcName.style.width = w > 0 ? Math.ceil(w) + 2 + "px" : "";
+}
+
+function cycleSource(dir) {
+	const ready = readySources();
+	if (ready.length < 2) return;
+	let idx = ready.findIndex((e) => e.id === state.sources.current);
+	if (idx < 0) idx = 0;
+	api.selectSource(ready[(idx + dir + ready.length) % ready.length].id);
+}
+
+el.srcPrev.addEventListener("click", () => cycleSource(-1));
+el.srcNext.addEventListener("click", () => cycleSource(1));
+
+api.onSources((data) => {
+	state.sources = {
+		entries: (data && data.entries) || [],
+		current: (data && data.current) || null,
+		settled: !!(data && data.settled)
+	};
+	const cur = state.sources.entries.find((e) => e.id === state.sources.current);
+	if (cur) el.srcName.textContent = cur.name;
+	renderSourceSwitcher();
 });

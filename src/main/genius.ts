@@ -168,14 +168,18 @@ export async function getGeniusLyrics(
 			{ Authorization: `Bearer ${token}`, "User-Agent": "aura/0.1.0" }
 		);
 		if (!search) return { result: null, definitive: false };
-		if (search.status !== 200) return { result: null, definitive: true };
+		// a non-200 search (403 rate limit, 5xx) says nothing about whether
+		// the song exists — never treat it as a definitive "no" (a burst of
+		// lookups must not negative-cache real lyrics away)
+		if (search.status !== 200) return { result: null, definitive: false };
 
 		let hits: GeniusHit[] = [];
 		try {
 			const parsed = JSON.parse(search.body);
 			hits = parsed?.response?.hits || [];
 		} catch (_e) {
-			return { result: null, definitive: true };
+			// a 200 with an unparseable body is a server anomaly, not a "no"
+			return { result: null, definitive: false };
 		}
 
 		const hit = pickHit(hits, title, artist, strict);

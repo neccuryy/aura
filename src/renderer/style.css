@@ -83,19 +83,62 @@ body {
 }
 
 #lyrics-source {
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	min-height: 15px;
+	opacity: 0;
+	transition: opacity 0.25s ease;
+	user-select: none;
+}
+
+/* the name slot is sized by JS to the longest source name (e.g. "GENIUS")
+   so the arrows sit right next to it and never move on switching;
+   names are never abbreviated */
+#src-name {
+	text-align: center;
 	font-size: 11px;
 	letter-spacing: 0.14em;
 	text-transform: uppercase;
 	color: var(--text-dim);
-	opacity: 0;
-	transition: opacity 0.25s ease;
-	max-width: min(38vh, 21vw);
-	min-height: 15px;
 	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	user-select: none;
 	cursor: default;
+}
+
+/* hidden text measurer — same typography as #src-name, no layout impact */
+#src-sizer {
+	position: absolute;
+	visibility: hidden;
+	white-space: pre;
+	font-size: 11px;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+	font-family: inherit;
+}
+
+.src-arrow {
+	background: none;
+	border: none;
+	padding: 0 3px;
+	font-size: 12px;
+	font-family: inherit;
+	line-height: 1;
+	color: var(--text-dim);
+	cursor: pointer;
+	opacity: 0.7;
+}
+
+.src-arrow:hover,
+.src-arrow:focus-visible {
+	opacity: 1;
+	color: var(--accent);
+	outline: none;
+}
+
+/* reserve the slot — arrows appear/disappear without shifting the layout */
+.src-arrow.hidden {
+	visibility: hidden;
 }
 
 #lyrics-source.visible,
@@ -507,6 +550,27 @@ body {
 #index-stats {
 	margin-top: 14px;
 	font-size: 12px;
+	color: var(--text-dim);
+}
+
+.settings-section {
+	padding-top: 14px;
+	margin-top: 6px;
+	border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.settings-section h3 {
+	font-size: 14px;
+	margin-bottom: 10px;
+}
+
+.settings-section .modal-actions {
+	align-items: center;
+	justify-content: space-between;
+}
+
+#cache-stats {
+	font-size: 13px;
 	color: var(--text-dim);
 }
 

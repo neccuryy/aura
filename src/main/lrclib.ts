@@ -204,18 +204,47 @@ export function clearLyricsCache(artist: string | undefined, title: string): voi
 	} catch (_e) {}
 }
 
-// Stage 2 (aura-align): persist a locally computed alignment so the next
+// settings panel: size of the whole lyrics cache (verdicts + misses)
+export function lyricsCacheStats(): { files: number; bytes: number } {
+	try {
+		let files = 0;
+		let bytes = 0;
+		for (const name of fs.readdirSync(cacheDir())) {
+			const st = fs.statSync(path.join(cacheDir(), name));
+			if (st.isFile()) {
+				files++;
+				bytes += st.size;
+			}
+		}
+		return { files, bytes };
+	} catch (_e) {
+		return { files: 0, bytes: 0 };
+	}
+}
+
+// settings panel: wipe the whole lyrics cache
+export function clearAllLyricsCache(): void {
+	try {
+		for (const name of fs.readdirSync(cacheDir())) {
+			fs.unlinkSync(path.join(cacheDir(), name));
+		}
+	} catch (_e) {}
+}
+
+// Stage 2 ("aura"): persist a locally computed alignment so the next
 // play starts synced. Only called when no synced version was delivered for
 // the track; still refuses to overwrite a cached synced verdict (a late
-// Lrclib upgrade may have landed after the display was last touched)
+// Lrclib upgrade may have landed after the display was last touched).
+// Returns whether the alignment was actually written.
 export function saveAlignedLyrics(
 	artist: string | undefined,
 	title: string,
 	lines: { text: string; time: number }[]
-): void {
+): boolean {
 	const cached = readCache(artist, title);
-	if (cached && cached.synchronized) return;
-	writeCache(artist, title, { lines, synchronized: true, source: "aura-align" }, true);
+	if (cached && cached.synchronized) return false;
+	writeCache(artist, title, { lines, synchronized: true, source: "aura" }, true);
+	return true;
 }
 
 async function fetchFromLrclib(
@@ -260,6 +289,14 @@ async function fetchFromLrclib(
 
 export interface LookupOutcome {
 	result: OnlineLyrics | null;
+	// every source that produced lyrics in this lookup (cached verdict,
+	// Lrclib, Genius) — the source switcher offers them all; the pipeline
+	// still displays `result` (its priority winner)
+	candidates: OnlineLyrics[];
+	// true when `result` came from the disk cache (no online search ran) —
+	// the caller may launch a read-only "fresh" re-search to recover the
+	// other sources for the switcher
+	fromCache: boolean;
 	// true when Lrclib answered transiently (429/5xx/timeout) — the caller
 	// should keep retrying it in the background and upgrade the displayed
 	// Genius text to the synced Lrclib version when it finally answers
@@ -278,20 +315,30 @@ export async function lookupLyrics(
 	artist: string | undefined,
 	duration: number | undefined,
 	geniusToken?: string,
-	strict = false
+	strict = false,
+	// true = read-only re-search for the switcher: skip the cache read (we
+	// already show the cached verdict) and never write the cache (the fresh
+	// online answer must not overwrite the saved aura alignment)
+	fresh = false
 ): Promise<LookupOutcome> {
-	if (!title) return { result: null, lrclibPending: false, lrclibVerify: false };
+	if (!title) return { result: null, candidates: [], fromCache: false, lrclibPending: false, lrclibVerify: false };
 
-	const cached = readCache(artist, title);
-	if (cached !== undefined) return { result: cached, lrclibPending: false, lrclibVerify: false };
-	if (hasMiss(artist, title)) return { result: null, lrclibPending: false, lrclibVerify: false };
-
-	const lrclib = await fetchFromLrclib(title, artist, duration, strict);
-	if (lrclib.result) {
-		writeCache(artist, title, lrclib.result, true);
-		return { result: lrclib.result, lrclibPending: false, lrclibVerify: false };
+	if (!fresh) {
+		const cached = readCache(artist, title);
+		if (cached) return { result: cached, candidates: [cached], fromCache: true, lrclibPending: false, lrclibVerify: false };
+		if (hasMiss(artist, title)) return { result: null, candidates: [], fromCache: true, lrclibPending: false, lrclibVerify: false };
 	}
 
+	const lrclib = await fetchFromLrclib(title, artist, duration, strict);
+	const lrclibHit = lrclib.result;
+	if (lrclibHit && (lrclibHit.synchronized || lrclibHit.instrumental)) {
+		if (!fresh) writeCache(artist, title, lrclibHit, true);
+		return { result: lrclibHit, candidates: [lrclibHit], fromCache: false, lrclibPending: false, lrclibVerify: false };
+	}
+
+	// Lrclib gave plain text (or nothing) — Genius is both the fallback and
+	// a switchable alternative, so query it either way; a synced Lrclib hit
+	// above skips Genius entirely (nothing there can beat synced timings)
 	let geniusResult: OnlineLyrics | null = null;
 	let geniusDefinitive = true; // no token → Genius doesn't affect the verdict
 	if (geniusToken) {
@@ -299,20 +346,30 @@ export async function lookupLyrics(
 		if (genius.result) geniusResult = genius.result;
 		else geniusDefinitive = genius.definitive;
 	}
+	const candidates: OnlineLyrics[] = [];
+	if (lrclib.result) candidates.push(lrclib.result);
+	if (geniusResult) candidates.push(geniusResult);
 
 	if (!lrclib.definitive) {
 		// Lrclib never actually answered — show whatever Genius found but
 		// cache nothing; the caller runs pursueLrclib to keep trying for
 		// the synced version
-		return { result: geniusResult, lrclibPending: true, lrclibVerify: false };
+		return { result: geniusResult, candidates, fromCache: false, lrclibPending: true, lrclibVerify: false };
 	}
 
 	// negative-cache only when the whole pipeline answered definitively —
 	// a network error anywhere must not poison the cache
-	writeCache(artist, title, geniusResult, geniusDefinitive);
+	if (!fresh) writeCache(artist, title, lrclib.result || geniusResult, geniusDefinitive);
 	// Lrclib's definitive "no" sometimes flakes — when Genius covered the
-	// track, re-check Lrclib once in the background
-	return { result: geniusResult, lrclibPending: false, lrclibVerify: !!geniusResult };
+	// track (and Lrclib gave nothing at all), re-check Lrclib once in the
+	// background
+	return {
+		result: lrclib.result || geniusResult,
+		candidates,
+		fromCache: false,
+		lrclibPending: false,
+		lrclibVerify: !!geniusResult && !lrclib.result
+	};
 }
 
 // first retry almost immediately — a transient 429/timeout often clears at

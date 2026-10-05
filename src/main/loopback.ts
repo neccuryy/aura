@@ -5,7 +5,7 @@
 // turns segments into synced lyrics.
 
 import * as path from "path";
-import { VoiceIsolator, VadSegmenter, VocalSegment } from "./dsp";
+import { VocalPipeline, VadSegmenter, VocalSegment } from "./dsp";
 
 interface LoopbackChunk {
 	sampleRate: number;
@@ -24,10 +24,7 @@ interface LoopbackAddon {
 }
 
 let instance: LoopbackInstance | null = null;
-let isolator: VoiceIsolator | null = null;
-let segmenter: VadSegmenter | null = null;
-let midBuf: Float32Array | null = null;
-let sideBuf: Float32Array | null = null;
+let pipeline: VocalPipeline | null = null;
 
 // per-second aggregation state (observability while tuning the DSP)
 let secondIndex = 0;
@@ -40,6 +37,7 @@ let floor = Infinity; // running minimum of per-second mix RMS — the "silence"
 let totalFrames = 0;  // timeline position since capture start
 let cpuStart: NodeJS.CpuUsage | null = null;
 let cpuStartTime = 0;
+let lastChunkWall = 0; // wall clock of the last delivered chunk — watchdog input
 
 // Stage 2 track clock: SMTC position samples pair the capture timeline
 // with the track timeline so vocal segments can be mapped into track
@@ -73,7 +71,9 @@ export function beginTrack(): void {
 // map capture time → track time
 export function noteTrackPosition(trackT: number): void {
 	if (!instance) return;
-	trackSamples.push({ captureT: captureTime(), trackT });
+	const captureT = captureTime();
+	trackSamples.push({ captureT, trackT });
+	console.log(`[clock] cap=${captureT.toFixed(2)}s track=${trackT.toFixed(2)}s`);
 	// bound the buffer — hours of playback still map fine via interpolation
 	if (trackSamples.length > 20000) trackSamples.splice(0, 10000);
 }
@@ -125,8 +125,8 @@ export function getTrackSegments(): { start: number; end: number }[] {
 	if (!instance) return [];
 	const now = captureTime();
 	const closed = trackSegments.slice();
-	if (segmenter && segmenter.active) {
-		closed.push({ start: Math.max(segmenter.currentStart, trackStartT), end: now });
+	if (pipeline && pipeline.vad.active) {
+		closed.push({ start: Math.max(pipeline.vad.currentStart, trackStartT), end: now });
 	}
 	const out: { start: number; end: number }[] = [];
 	for (const seg of closed) {
@@ -137,6 +137,7 @@ export function getTrackSegments(): { start: number; end: number }[] {
 		if (end - start < 0.2) continue;
 		out.push({ start, end });
 	}
+	console.log(`[align] segs(track): ${out.map((s) => `${s.start.toFixed(1)}–${s.end.toFixed(1)}`).join(", ") || "(none)"}`);
 	return out;
 }
 
@@ -151,10 +152,10 @@ function logSecond(channels: number) {
 	const side = Math.sqrt(sideSumSquares / sampleCount);
 	if (mix < floor) floor = mix;
 	// mix-active = clearly above the quietest second we've seen — true while
-	// any music plays; voice−side is the column that should contrast
+	// any music plays; the VLS threshold is the column that should contrast
 	const active = mix > floor * 3 && mix > 0.001;
-	const thr = segmenter ? segmenter.threshold : 0;
-	const seg = segmenter ? (segmenter.active ? 1 : 0) : 0;
+	const thr = pipeline ? pipeline.vad.threshold : 0;
+	const seg = pipeline ? (pipeline.vad.active ? 1 : 0) : 0;
 	console.log(
 		`[loopback] t=${secondIndex}s mix=${mix.toFixed(5)} mid=${mid.toFixed(5)} side=${side.toFixed(5)} thr=${thr.toFixed(5)} seg=${seg} peak=${peak.toFixed(3)} active=${active}`
 	);
@@ -166,7 +167,10 @@ function logSecond(channels: number) {
 	peak = 0;
 }
 
-export function startLoopback(): void {
+// preserveTimeline: watchdog restart — the capture timeline (frames, clock
+// samples, segments, VAD state) survives so evidence collected before the
+// capture death stays valid; only the dead device handle is replaced
+export function startLoopback(preserveTimeline = false, adoptVad?: VadSegmenter): void {
 	if (instance) return;
 	try {
 		const addon: LoopbackAddon = require(path.join(
@@ -184,15 +188,17 @@ export function startLoopback(): void {
 	sideSumSquares = 0;
 	sampleCount = 0;
 	peak = 0;
-	floor = Infinity;
-	totalFrames = 0;
-	captureSampleRate = 0;
-	trackSamples = [];
-	trackSegments = [];
-	energySamples = [];
-	trackStartT = 0;
-	isolator = null; // built on the first chunk (needs the real sample rate)
-	segmenter = null;
+	if (!preserveTimeline) {
+		floor = Infinity;
+		totalFrames = 0;
+		captureSampleRate = 0;
+		trackSamples = [];
+		trackSegments = [];
+		energySamples = [];
+		trackStartT = 0;
+		pipeline = null; // built on the first chunk (needs the real sample rate)
+	}
+	lastChunkWall = Date.now();
 	cpuStart = process.cpuUsage();
 	cpuStartTime = process.uptime();
 
@@ -201,10 +207,16 @@ export function startLoopback(): void {
 			console.log(`[loopback] capture error: ${arg.message}`);
 			return;
 		}
+		lastChunkWall = Date.now();
 		const chunk = arg;
-		if (!segmenter || !isolator) {
-			isolator = new VoiceIsolator(chunk.sampleRate);
-			segmenter = new VadSegmenter();
+		// pipeline is rebuilt whenever the sample rate changes (device
+		// switch after a capture death) — totalFrames is rescaled so
+		// captureTime() stays continuous across the restart
+		if (!pipeline || chunk.sampleRate !== captureSampleRate) {
+			if (captureSampleRate && captureSampleRate !== chunk.sampleRate) {
+				totalFrames = Math.round((totalFrames * chunk.sampleRate) / captureSampleRate);
+			}
+			pipeline = new VocalPipeline(chunk.sampleRate, adoptVad);
 			captureSampleRate = chunk.sampleRate;
 		}
 
@@ -212,12 +224,6 @@ export function startLoopback(): void {
 			chunk.data.buffer, chunk.data.byteOffset, chunk.data.byteLength / 4
 		);
 		const frames = samples.length / chunk.channels;
-		if (!midBuf || midBuf.length < frames) {
-			midBuf = new Float32Array(frames);
-			sideBuf = new Float32Array(frames);
-		}
-		// allocated together above — sideBuf is never null when midBuf isn't
-		isolator.process(samples, chunk.channels, frames, midBuf, sideBuf!);
 
 		// full-mix RMS + peak (observability column)
 		for (let i = 0; i < samples.length; i++) {
@@ -227,34 +233,23 @@ export function startLoopback(): void {
 			if (a > peak) peak = a;
 		}
 
-		// bandpassed mid/side frame RMS → VAD
-		let mss = 0;
-		let sss = 0;
-		const midArr = midBuf;
-		const sideArr = sideBuf as Float32Array;
-		for (let i = 0; i < frames; i++) {
-			mss += midArr[i] * midArr[i];
-			sss += sideArr[i] * sideArr[i];
-		}
-		const midRms = Math.sqrt(mss / frames);
-		const sideRms = Math.sqrt(sss / frames);
 		const tStart = totalFrames / chunk.sampleRate;
 		totalFrames += frames;
-		// effective vocal energy for the envelope (mid−side, floor 0)
-		energySamples.push({ t: tStart, e: Math.max(0, midRms - sideRms) });
+		const wasActive = pipeline.vad.active;
+		// isolator → VLS scorer → VAD, per 20ms sub-frames
+		const res = pipeline.onChunk(samples, chunk.channels, frames, tStart);
+		for (const e of res.energy) energySamples.push(e);
 		if (energySamples.length > 100000) energySamples.splice(0, 50000);
-		const wasActive = segmenter.active;
-		const seg = segmenter.onFrame(midRms, sideRms, frames / chunk.sampleRate, tStart);
-		if (!wasActive && segmenter.active) {
-			console.log(`[vad] open @ ${segmenter.currentStart.toFixed(1)}s`);
+		if (res.segment) {
+			console.log(`[vad] segment ${fmtSegment(res.segment)}`);
+			trackSegments.push(res.segment);
 		}
-		if (seg) {
-			console.log(`[vad] segment ${fmtSegment(seg)}`);
-			trackSegments.push(seg);
+		if (!wasActive && pipeline.vad.active) {
+			console.log(`[vad] open @ ${pipeline.vad.currentStart.toFixed(1)}s`);
 		}
 
-		midSumSquares += mss;
-		sideSumSquares += sss;
+		midSumSquares += res.midRms * res.midRms * frames;
+		sideSumSquares += res.sideRms * res.sideRms * frames;
 		sampleCount += frames;
 
 		// one log line per second of audio
@@ -268,15 +263,14 @@ export function stopLoopback(): void {
 	if (!instance) return;
 	instance.stop();
 	instance = null;
-	if (segmenter) {
-		const seg = segmenter.flush();
+	if (pipeline) {
+		const seg = pipeline.flush();
 		if (seg) {
 			console.log(`[vad] segment ${fmtSegment(seg)}`);
 			trackSegments.push(seg);
 		}
-		segmenter = null;
+		pipeline = null;
 	}
-	isolator = null;
 	if (cpuStart) {
 		const cpu = process.cpuUsage(cpuStart);
 		const wall = (process.uptime() - cpuStartTime) * 1000;
@@ -285,4 +279,65 @@ export function stopLoopback(): void {
 		);
 	}
 	cpuStart = null;
+}
+
+// while the capture was dead the poll loop kept recording clock samples
+// with a frozen captureT — collapse those runs to a single sample so the
+// piecewise-linear clock doesn't accumulate zero-slope junk
+function pruneFrozenSamples(): void {
+	if (trackSamples.length < 2) return;
+	const out: TrackSample[] = [trackSamples[0]];
+	for (let k = 1; k < trackSamples.length; k++) {
+		if (trackSamples[k].captureT !== out[out.length - 1].captureT) {
+			out.push(trackSamples[k]);
+		}
+	}
+	const dropped = trackSamples.length - out.length;
+	trackSamples = out;
+	if (dropped > 0) {
+		console.log(`[loopback] watchdog: pruned ${dropped} frozen clock samples`);
+	}
+}
+
+// replace the dead WASAPI instance while keeping the capture timeline:
+// frames, clock samples, closed segments, energy envelope and the VAD's
+// adaptive noise floor all survive; the open segment is closed at the last
+// frame we saw so the dead gap never ends up inside a segment
+export function restartLoopback(): void {
+	console.log("[loopback] watchdog: capture stalled, restarting (timeline preserved)");
+	if (pipeline) {
+		// flush() drains one held segment per call (merge-delayed close) —
+		// two calls empty both pending and the just-closed open segment
+		for (let i = 0; i < 2; i++) {
+			const seg = pipeline.flush();
+			if (seg) {
+				console.log(`[vad] segment ${fmtSegment(seg)}`);
+				trackSegments.push(seg);
+			}
+		}
+	}
+	if (instance) {
+		try {
+			instance.stop();
+		} catch {
+			// already dead — that's why we're here
+		}
+		instance = null;
+	}
+	// the isolator/scorer must be rebuilt (sample rate may differ) but the
+	// VAD's adaptive noise floor survives the restart
+	const vad = pipeline ? pipeline.vad : undefined;
+	pipeline = null;
+	pruneFrozenSamples();
+	startLoopback(true, vad);
+}
+
+const WATCHDOG_TIMEOUT = 5000; // ms without chunks while playing → restart
+
+// called from the 500ms poll loop: WASAPI loopback silently stops
+// delivering packets on device changes / exclusive-mode takeovers, and
+// every track after that gets zero segments until the app restarts
+export function checkLoopbackWatchdog(playing: boolean): void {
+	if (!instance || !playing) return;
+	if (Date.now() - lastChunkWall > WATCHDOG_TIMEOUT) restartLoopback();
 }

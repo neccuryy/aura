@@ -18,6 +18,7 @@
 		"@types/sharp": "^0.29.5",
 		"electron": "^17.0.0",
 		"electron-builder": "^22.14.12",
+		"mpg123-decoder": "^1.0.3",
 		"typescript": "^4.5.2"
 	},
 	"dependencies": {

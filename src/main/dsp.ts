@@ -99,6 +99,148 @@ export interface VocalSegment {
 	end: number;
 }
 
+// ── VLS (Vocal Likelihood Score) ──────────────────────────────────────────
+// A bare speech-band RMS level cannot separate vocals from a dense
+// center-panned instrumental bed (the bed leaks into mid at a comparable
+// level the whole track). Two classic signatures do separate them:
+//  - syllable-rate amplitude modulation (3–8 Hz): vowels open and close
+//    several times a second; pads/sustained guitars modulate near 0 Hz
+//  - zero-crossing rate: hi-hats/cymbals leakage sits at the top of the
+//    band, voiced vocals at the bottom
+// VLS = bandpassedRMS × R_mod × zcrGate, computed per 20 ms sub-frame.
+
+const SUBFRAME_SEC = 0.02;   // 20 ms — envelope rate 50 Hz (plan §3.2)
+const ENV_FRAMES = 50;       // 1 s of envelope history for R_mod
+const MOD_HP = 3;            // Hz — syllable modulation band
+const MOD_LP = 8;
+const ZCR_HIGH = 0.35;       // crossings/sample — above this reads as
+                             // percussion/noise leakage, not voice
+const ZCR_GATE_LOW = 0.1;    // gate value when ZCR is too high
+
+export interface SubframeFeatures {
+	t: number;
+	rms: number;
+	zcr: number;
+	rmod: number;
+	vls: number;
+}
+
+export class VocalScorer {
+	private readonly subFrames: number;
+	private readonly env: number[] = [];      // raw envelope ring
+	private readonly envMod: number[] = [];   // bandpassed envelope ring
+	private readonly modHp: Biquad;
+	private readonly modLp: Biquad;
+
+	constructor(sampleRate: number) {
+		this.subFrames = Math.max(1, Math.round(sampleRate * SUBFRAME_SEC));
+		const envFs = 1 / SUBFRAME_SEC;
+		this.modHp = Biquad.highpass(envFs, MOD_HP);
+		this.modLp = Biquad.lowpass(envFs, MOD_LP);
+	}
+
+	// mid: bandpassed mid-channel samples for one capture chunk
+	processChunk(mid: Float32Array, frames: number, tStart: number): SubframeFeatures[] {
+		const out: SubframeFeatures[] = [];
+		for (let off = 0; off < frames; off += this.subFrames) {
+			const n = Math.min(this.subFrames, frames - off);
+			let sumSq = 0;
+			let crossings = 0;
+			let prev = mid[off];
+			for (let i = 0; i < n; i++) {
+				const x = mid[off + i];
+				sumSq += x * x;
+				if ((x >= 0 && prev < 0) || (x < 0 && prev >= 0)) crossings++;
+				prev = x;
+			}
+			const rms = Math.sqrt(sumSq / n);
+			const zcr = n > 1 ? crossings / (n - 1) : 0;
+			// envelope bandpass 3–8 Hz — stateful, fed once per sub-frame
+			const mod = this.modLp.processSample(this.modHp.processSample(rms));
+			this.env.push(rms);
+			this.envMod.push(mod);
+			if (this.env.length > ENV_FRAMES) {
+				this.env.shift();
+				this.envMod.shift();
+			}
+			let envSq = 0, modSq = 0;
+			for (let i = 0; i < this.env.length; i++) {
+				envSq += this.env[i] * this.env[i];
+				modSq += this.envMod[i] * this.envMod[i];
+			}
+			const envRms = Math.sqrt(envSq / this.env.length);
+			const modRms = Math.sqrt(modSq / this.envMod.length);
+			const rmod = envRms > 1e-4 ? modRms / envRms : 0;
+			const zcrGate = zcr > ZCR_HIGH ? ZCR_GATE_LOW : 1;
+			const t = tStart + off / this.subFrames * SUBFRAME_SEC;
+			out.push({ t, rms, zcr, rmod, vls: rms * rmod * zcrGate });
+		}
+		return out;
+	}
+}
+
+// ── full per-chunk DSP pipeline ───────────────────────────────────────────
+// One object runs everything between raw PCM and VAD segments so the live
+// capture path and the offline benchmark execute literally the same code.
+
+export interface PipelineChunkResult {
+	segment: VocalSegment | null; // closed (merge-delayed) segment, if any
+	midRms: number;               // chunk-level bandpassed mid RMS (logging)
+	sideRms: number;
+	energy: { t: number; e: number }[]; // per-sub-frame VLS samples
+	features: SubframeFeatures[];       // full per-sub-frame feature dump
+}
+
+export class VocalPipeline {
+	private readonly isolator: VoiceIsolator;
+	private readonly scorer: VocalScorer;
+	readonly vad: VadSegmenter;
+	private midBuf: Float32Array;
+	private sideBuf: Float32Array;
+
+	constructor(sampleRate: number, adoptVad?: VadSegmenter) {
+		this.isolator = new VoiceIsolator(sampleRate);
+		this.scorer = new VocalScorer(sampleRate);
+		this.vad = adoptVad || new VadSegmenter();
+		this.midBuf = new Float32Array(0);
+		this.sideBuf = new Float32Array(0);
+	}
+
+	// input: interleaved float32 PCM (any channel count ≥ 1)
+	onChunk(input: Float32Array, channels: number, frames: number, tStart: number): PipelineChunkResult {
+		if (this.midBuf.length < frames) {
+			this.midBuf = new Float32Array(frames);
+			this.sideBuf = new Float32Array(frames);
+		}
+		const mid = this.midBuf;
+		const side = this.sideBuf;
+		this.isolator.process(input, channels, frames, mid, side);
+		let mss = 0, sss = 0;
+		for (let i = 0; i < frames; i++) {
+			mss += mid[i] * mid[i];
+			sss += side[i] * side[i];
+		}
+		const feats = this.scorer.processChunk(mid, frames, tStart);
+		let segment: VocalSegment | null = null;
+		for (const f of feats) {
+			const seg = this.vad.onFrame(f.vls, SUBFRAME_SEC, f.t);
+			if (seg) segment = seg;
+		}
+		return {
+			segment,
+			midRms: Math.sqrt(mss / frames),
+			sideRms: Math.sqrt(sss / frames),
+			energy: feats.map((f) => ({ t: f.t, e: f.vls })),
+			features: feats
+		};
+	}
+
+	// drain merge-delayed segments on capture stop
+	flush(): VocalSegment | null {
+		return this.vad.flush();
+	}
+}
+
 // Hysteresis VAD over variable-duration frames of vocal-band RMS.
 // The noise floor adapts (drops instantly to quiet frames, creeps up slowly
 // toward louder ones), so the threshold tracks the instrumental bed of the
@@ -108,8 +250,8 @@ const EXIT_TIME = 0.4;   // s below to close — hangover bridges short breaths
 const MIN_SEGMENT = 0.3; // s — drop blips (system sounds, clicks)
 const MERGE_GAP = 0.3;   // s — bridge short pauses inside a sung line
 const FLOOR_HEADROOM = 2;   // threshold = noise floor × this
-const FLOOR_ABS = 0.004;    // absolute threshold floor (digital-silence guard)
-const FLOOR_WINDOW = 100;   // frames (~5s) the noise floor is computed over
+const FLOOR_ABS = 0.001;    // absolute threshold floor (digital-silence guard)
+const FLOOR_WINDOW = 100;   // frames (2s at 20ms sub-frames) for the floor
 const FLOOR_PERCENTILE = 0.2; // 20th percentile of the window = the bed level
 
 export class VadSegmenter {
@@ -147,12 +289,12 @@ export class VadSegmenter {
 		return Math.max(this.noiseFloor() * FLOOR_HEADROOM, FLOOR_ABS);
 	}
 
-	// midRms/sideRms: bandpassed mid/side frame levels. The instrumental bed
-	// leaks into mid, but stereo instruments land in side — subtracting side
-	// from mid suppresses the bed and keeps the center-panned voice.
+	// level: per-frame vocal-likelihood (VLS). The noise floor adapts to the
+	// recent window so the threshold tracks the instrumental bed instead of
+	// a fixed absolute level.
 	// returns a finished segment when one closes (merge-delayed), else null
-	onFrame(midRms: number, sideRms: number, dur: number, tStart: number): VocalSegment | null {
-		const rms = Math.max(0, midRms - sideRms);
+	onFrame(level: number, dur: number, tStart: number): VocalSegment | null {
+		const rms = Math.max(0, level);
 		this.lastT = tStart + dur;
 		this.window.push(rms);
 		if (this.window.length > FLOOR_WINDOW) this.window.shift();

@@ -9,6 +9,10 @@ const api = {
 		ipcRenderer.invoke("remove-folder", folder),
 	reindex: (): Promise<{ folders: string[]; trackCount: number; lrcCount: number }> =>
 		ipcRenderer.invoke("reindex"),
+	cacheStats: (): Promise<{ files: number; bytes: number }> =>
+		ipcRenderer.invoke("cache:stats"),
+	clearCache: (): Promise<{ files: number; bytes: number }> =>
+		ipcRenderer.invoke("cache:clear"),
 	onTrack: (cb: (data: unknown) => void): void => {
 		ipcRenderer.on("track", (_e, data) => cb(data));
 	},
@@ -24,6 +28,10 @@ const api = {
 	onLyrics: (cb: (data: unknown) => void): void => {
 		ipcRenderer.on("lyrics", (_e, data) => cb(data));
 	},
+	onSources: (cb: (data: unknown) => void): void => {
+		ipcRenderer.on("sources", (_e, data) => cb(data));
+	},
+	selectSource: (id: string): void => ipcRenderer.send("lyrics:select-source", id),
 	wrongLyrics: (): void => ipcRenderer.send("lyrics:wrong"),
 	retryLyrics: (): void => ipcRenderer.send("lyrics:retry"),
 	playPause: (): void => ipcRenderer.send("control", "playpause"),
