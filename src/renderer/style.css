@@ -63,6 +63,57 @@ body {
 
 .hidden { display: none !important; }
 
+/* ---------- custom window controls ---------- */
+
+/* fully transparent minimize / maximize / close over the fluid background —
+   native proportions (46×36), same slot the native overlay used to occupy */
+#win-controls {
+	position: fixed;
+	top: 0;
+	right: 0;
+	display: flex;
+	height: var(--titlebar-h);
+	/* above the settings modal (z-index 10) — native window controls stay
+	   reachable even when a modal covers the whole window */
+	z-index: 11;
+	-webkit-app-region: no-drag;
+}
+
+#win-controls button {
+	width: 46px;
+	height: var(--titlebar-h);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border: none;
+	background: transparent;
+	color: #f5f5f4;
+	cursor: default;
+	padding: 0;
+	transition: background 0.12s ease;
+}
+
+#win-controls svg {
+	width: 12px;
+	height: 12px;
+}
+
+#win-controls button:hover {
+	background: rgba(255, 255, 255, 0.09);
+}
+
+#win-controls button:active {
+	background: rgba(255, 255, 255, 0.06);
+}
+
+/* the close hover follows the native Windows convention — a red tint */
+#win-close:hover {
+	background: rgba(232, 17, 35, 0.85);
+}
+
+/* fullscreen windows show no window controls, native-style */
+body.fullscreen #win-controls { display: none; }
+
 #app {
 	display: flex;
 	height: 100vh;
@@ -473,9 +524,51 @@ body {
 	border-radius: 16px;
 	padding: 24px;
 	box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+	/* the content scrolls in .modal-scroll inside — anything that pokes
+	   past the rounded frame is clipped here */
+	overflow: hidden;
+}
+
+/* the card keeps its rounded frame and shadow; the content scrolls inside.
+   The scroll div is pulled flush to the card's right edge (negative
+   margin) so the scrollbar sits right at the border, as it did before —
+   the card's rounded overflow:hidden clips it, so it can never poke out */
+.modal-scroll {
+	max-height: calc(100vh - 96px);
+	margin-right: -24px;
+	padding-right: 24px;
+	overflow-y: auto;
 }
 
 .modal-card h2 { font-size: 18px; margin-bottom: 8px; }
+
+/* thin rounded scrollbar; it sits flush at the frame's inner edge and is
+   clipped by the outer block's rounded overflow:hidden — it physically
+   cannot poke past the border */
+.modal-scroll::-webkit-scrollbar,
+#folder-list::-webkit-scrollbar,
+#ignore-list::-webkit-scrollbar {
+	width: 8px;
+}
+
+.modal-scroll::-webkit-scrollbar-track,
+#folder-list::-webkit-scrollbar-track,
+#ignore-list::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.modal-scroll::-webkit-scrollbar-thumb,
+#folder-list::-webkit-scrollbar-thumb,
+#ignore-list::-webkit-scrollbar-thumb {
+	background: rgba(255, 255, 255, 0.14);
+	border-radius: 4px;
+}
+
+.modal-scroll::-webkit-scrollbar-thumb:hover,
+#folder-list::-webkit-scrollbar-thumb:hover,
+#ignore-list::-webkit-scrollbar-thumb:hover {
+	background: rgba(255, 255, 255, 0.25);
+}
 
 .hint {
 	font-size: 13px;
@@ -572,6 +665,89 @@ body {
 #cache-stats {
 	font-size: 13px;
 	color: var(--text-dim);
+}
+
+/* ---------- settings: ignore list ---------- */
+
+/* the framed box around the sources; the list scrolls INSIDE it, flush to
+   the box's right edge (no right padding) so the scrollbar sits right at
+   the border — the box's rounded overflow:hidden clips it, so it can
+   never poke past the frame */
+#ignore-box {
+	border: 1px solid rgba(255, 255, 255, 0.09);
+	border-radius: 10px;
+	background: rgba(255, 255, 255, 0.03);
+	padding: 4px 0 4px 12px;
+	overflow: hidden;
+}
+
+/* fixed height (~3 rows) so the modal never grows with the list; the right
+   padding keeps the source names clear of the scrollbar at the edge */
+#ignore-list {
+	list-style: none;
+	margin: 0;
+	padding: 0 20px 0 0;
+	max-height: 118px;
+	overflow-y: auto;
+}
+
+#ignore-list li {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 8px 0;
+}
+
+#ignore-list li + li {
+	border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+#ignore-list .app-name {
+	font-size: 13px;
+	/* names render in full — wrap instead of truncating */
+	overflow-wrap: anywhere;
+}
+
+#ignore-list li.empty {
+	color: var(--text-dim);
+	font-size: 12px;
+	justify-content: flex-start;
+}
+
+.switch {
+	position: relative;
+	flex: none;
+	width: 40px;
+	height: 22px;
+	border-radius: 11px;
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	background: rgba(255, 255, 255, 0.08);
+	cursor: pointer;
+	padding: 0;
+	transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.switch::after {
+	content: "";
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 16px;
+	height: 16px;
+	border-radius: 50%;
+	background: var(--text-dim);
+	transition: left 0.15s ease, background 0.15s ease;
+}
+
+.switch[aria-checked="true"] {
+	background: var(--accent);
+	border-color: transparent;
+}
+
+.switch[aria-checked="true"]::after {
+	left: 20px;
+	background: #17141c;
 }
 
 /* ---------- fullscreen ---------- */

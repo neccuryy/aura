@@ -41,18 +41,43 @@ let lastChunkWall = 0; // wall clock of the last delivered chunk — watchdog in
 
 // Stage 2 track clock: SMTC position samples pair the capture timeline
 // with the track timeline so vocal segments can be mapped into track
-// seconds (player pauses and seeks included)
+// seconds. Each consecutive sample pair is classified (план item 5):
+// PLAY — the position advances with the capture clock; PAUSE — the
+// position is frozen while silence chunks still advance the capture
+// clock; SEEK — the position jumped (backward at all, or forward faster
+// than real time). Consecutive PLAY pairs form a "stretch" fitted with a
+// Theil-Sen robust line (median of pairwise slopes — SMTC reporting
+// jitter can't bend it); pauses and seeks break stretches, so the mapping
+// freezes across pauses and jumps cleanly across seeks.
 interface TrackSample {
 	captureT: number;
 	trackT: number;
 }
+type PairClass = "play" | "pause" | "seek";
+interface ClockStretch {
+	first: number; // sample index range within trackSamples
+	last: number;
+	alpha: number; // Theil-Sen fit: trackT ≈ alpha·captureT + beta
+	beta: number;
+	capFirst: number;
+	trackFirst: number;
+	capLast: number;
+	trackLast: number;
+}
 let captureSampleRate = 0;
 let trackSamples: TrackSample[] = [];
+let sampleStretch: number[] = []; // stretch index per sample
+let stretches: ClockStretch[] = [];
 let trackSegments: VocalSegment[] = []; // closed segments of the current track
 let trackStartT = 0; // capture time when the current track began
+let lastPairClass: PairClass | null = null;
+let evidenceCutCap = -Infinity; // capture time of the last seek — chunks older than it are stragglers
 // vocal energy envelope (effective vocal RMS per chunk) in capture time —
 // feeds intra-block segment refinement in the aligner
 let energySamples: { t: number; e: number }[] = [];
+
+const SEEK_JUMP_S = 1.5; // s — position vs capture clock beyond this = seek
+const PAUSE_TRACK_S = 0.1; // s — position frozen within this = pause
 
 export function captureTime(): number {
 	return captureSampleRate ? totalFrames / captureSampleRate : 0;
@@ -62,44 +87,186 @@ export function captureTime(): number {
 // previous one; call BEFORE reading segments for the new track
 export function beginTrack(): void {
 	trackSamples = [];
+	sampleStretch = [];
+	stretches = [];
 	trackSegments = [];
 	energySamples = [];
 	trackStartT = captureTime();
+	lastPairClass = null;
+	evidenceCutCap = -Infinity;
+}
+
+function classifyPair(prev: TrackSample, captureT: number, trackT: number): PairClass {
+	const dCap = captureT - prev.captureT;
+	const dTrack = trackT - prev.trackT;
+	// paused player: the position freezes while the capture clock keeps
+	// advancing (silence chunks still flow from the loopback device)
+	if (Math.abs(dTrack) <= PAUSE_TRACK_S && dCap >= 0.3) return "pause";
+	// position jumped: backward at all (an extrapolated position never
+	// moves back on its own), or forward faster than the capture clock
+	if (dTrack < -0.5 || dTrack > dCap + SEEK_JUMP_S) return "seek";
+	return "play";
+}
+
+// Theil-Sen robust fit of one stretch: median of pairwise slopes (long
+// baselines kill SMTC jitter; the stride keeps it O(n) on long stretches)
+// and a median intercept. Frozen-capture pairs (watchdog death) contribute
+// nothing — their baseline is zero.
+function fitStretch(st: ClockStretch): void {
+	const s = trackSamples;
+	const n = st.last - st.first + 1;
+	st.capFirst = s[st.first].captureT;
+	st.trackFirst = s[st.first].trackT;
+	st.capLast = s[st.last].captureT;
+	st.trackLast = s[st.last].trackT;
+	if (n < 2) {
+		st.alpha = 1;
+		st.beta = st.trackFirst - st.capFirst;
+		return;
+	}
+	const stride = Math.max(1, Math.floor(n / 100));
+	const slopes: number[] = [];
+	for (let i = st.first; i + stride <= st.last; i++) {
+		const dc = s[i + stride].captureT - s[i].captureT;
+		if (dc > 0.05) slopes.push((s[i + stride].trackT - s[i].trackT) / dc);
+	}
+	slopes.sort((a, b) => a - b);
+	const alpha = slopes.length ? slopes[Math.floor(slopes.length / 2)] : 1;
+	st.alpha = Math.min(2, Math.max(0.5, alpha));
+	const inter: number[] = [];
+	for (let i = st.first; i <= st.last; i++) inter.push(s[i].trackT - st.alpha * s[i].captureT);
+	inter.sort((a, b) => a - b);
+	st.beta = inter[Math.floor(inter.length / 2)];
+}
+
+function newStretch(idx: number): ClockStretch {
+	const st: ClockStretch = {
+		first: idx,
+		last: idx,
+		alpha: 1,
+		beta: 0,
+		capFirst: trackSamples[idx].captureT,
+		trackFirst: trackSamples[idx].trackT,
+		capLast: trackSamples[idx].captureT,
+		trackLast: trackSamples[idx].trackT
+	};
+	fitStretch(st);
+	return st;
+}
+
+// recompute the whole stretch structure from the raw samples (after the
+// watchdog pruned frozen samples or the rolling buffer dropped a chunk)
+function rebuildClock(): void {
+	stretches = [];
+	sampleStretch = new Array<number>(trackSamples.length);
+	for (let k = 0; k < trackSamples.length; k++) {
+		const cls =
+			k === 0
+				? "play"
+				: classifyPair(trackSamples[k - 1], trackSamples[k].captureT, trackSamples[k].trackT);
+		if (k === 0 || cls !== "play") stretches.push(newStretch(k));
+		else {
+			const st = stretches[stretches.length - 1];
+			st.last = k;
+			fitStretch(st);
+		}
+		sampleStretch[k] = stretches.length - 1;
+	}
+}
+
+// seek/replay: the open VAD segment is cut at the moment of the jump (its
+// pre-seek part stays valid evidence for the pre-seek position), and on a
+// backward jump everything mapped after the landing position is dropped —
+// the player is about to replay that region and would otherwise collect
+// near-duplicate segments (план item 5: "сбросить VAD-сегменты после
+// new_track_pos")
+function handleSeek(prev: TrackSample, captureT: number, trackT: number, backward: boolean): void {
+	if (pipeline) {
+		for (const seg of pipeline.splitAt(captureT)) {
+			console.log(`[vad] segment ${fmtSegment(seg)} (seek cut)`);
+			trackSegments.push(seg);
+		}
+	}
+	// chunks already in flight (captured before the seek, delivered after
+	// the filters below) must not land after the filtered arrays — their
+	// capture times predate the cut, so the chunk callback drops them
+	evidenceCutCap = captureT;
+	if (!backward) {
+		console.log(`[clock] seek ${prev.trackT.toFixed(1)}→${trackT.toFixed(1)}s (forward)`);
+		return;
+	}
+	const keepFrom = trackT + 0.5; // small slack for mapping jitter
+	const segsBefore = trackSegments.length;
+	trackSegments = trackSegments.filter((s) => captureToTrack(s.start) <= keepFrom);
+	const energyBefore = energySamples.length;
+	energySamples = energySamples.filter((e) => captureToTrack(e.t) <= keepFrom);
+	console.log(
+		`[clock] seek ${prev.trackT.toFixed(1)}→${trackT.toFixed(1)}s (backward): dropped ${segsBefore - trackSegments.length} segments, ${energyBefore - energySamples.length} energy samples`
+	);
 }
 
 // SMTC position tick (500ms poll loop) — records the pairing needed to
-// map capture time → track time
+// map capture time → track time and keeps the clock model honest across
+// pauses and seeks
 export function noteTrackPosition(trackT: number): void {
 	if (!instance) return;
 	const captureT = captureTime();
+	const prev = trackSamples[trackSamples.length - 1];
+	const cls: PairClass = prev ? classifyPair(prev, captureT, trackT) : "play";
+	if (cls === "seek" && prev) handleSeek(prev, captureT, trackT, trackT < prev.trackT);
 	trackSamples.push({ captureT, trackT });
-	console.log(`[clock] cap=${captureT.toFixed(2)}s track=${trackT.toFixed(2)}s`);
-	// bound the buffer — hours of playback still map fine via interpolation
-	if (trackSamples.length > 20000) trackSamples.splice(0, 10000);
+	if (!prev || cls !== "play") stretches.push(newStretch(trackSamples.length - 1));
+	else {
+		const st = stretches[stretches.length - 1];
+		st.last = trackSamples.length - 1;
+		fitStretch(st);
+	}
+	sampleStretch.push(stretches.length - 1);
+	if (cls !== lastPairClass) {
+		if (cls === "pause") console.log(`[clock] pause @ track=${trackT.toFixed(1)}s`);
+		else if (cls === "play" && lastPairClass === "pause")
+			console.log(`[clock] resume @ track=${trackT.toFixed(1)}s`);
+		lastPairClass = cls;
+	}
+	// bound the buffer — hours of playback still map fine via the stretches
+	if (trackSamples.length > 20000) {
+		trackSamples.splice(0, 10000);
+		sampleStretch.splice(0, 10000);
+		rebuildClock();
+	}
 }
 
-function slopeBetween(a: TrackSample, b: TrackSample): number {
-	const dt = b.captureT - a.captureT;
-	return dt > 0 ? (b.trackT - a.trackT) / dt : 0;
-}
-
+// robust capture → track mapping: inside a playing stretch the Theil-Sen
+// line clamped to the stretch's own track range (mapping stays monotone);
+// across a pause or seek boundary the track stood at the previous value;
+// outside the sample range the nearest stretch's line extrapolates
 function captureToTrack(captureT: number): number {
 	const s = trackSamples;
 	if (s.length === 0) return 0;
-	if (captureT <= s[0].captureT) {
-		// before the first sample — back-extrapolate with the first slope
-		const slope = s.length > 1 ? Math.max(0, slopeBetween(s[0], s[1])) : 0;
-		return Math.max(0, s[0].trackT - (s[0].captureT - captureT) * slope);
+	if (s.length === 1) return Math.max(0, s[0].trackT + (captureT - s[0].captureT));
+	// binary search: first sample at/after the query
+	let lo = 0;
+	let hi = s.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >> 1;
+		if (s[mid].captureT < captureT) lo = mid + 1;
+		else hi = mid;
 	}
-	for (let k = 1; k < s.length; k++) {
-		if (captureT <= s[k].captureT) {
-			return s[k - 1].trackT + (captureT - s[k - 1].captureT) * slopeBetween(s[k - 1], s[k]);
-		}
+	if (lo === 0) {
+		const st = stretches[sampleStretch[0]];
+		return Math.max(0, st.trackFirst + (captureT - st.capFirst) * st.alpha);
 	}
-	// after the last sample — forward-extrapolate with the last slope
-	const last = s[s.length - 1];
-	const slope = s.length > 1 ? slopeBetween(s[s.length - 2], last) : 0;
-	return last.trackT + (captureT - last.captureT) * Math.max(0, slope);
+	if (lo === s.length) {
+		const st = stretches[sampleStretch[s.length - 1]];
+		return st.trackLast + (captureT - st.capLast) * st.alpha;
+	}
+	if (classifyPair(s[lo - 1], s[lo].captureT, s[lo].trackT) !== "play") {
+		// pause or seek boundary — the track stood at the previous value
+		return s[lo - 1].trackT;
+	}
+	const st = stretches[sampleStretch[lo]];
+	const t = st.beta + st.alpha * captureT;
+	return Math.min(st.trackLast, Math.max(st.trackFirst, t));
 }
 
 // vocal energy envelope of the current track in TRACK time. Samples that
@@ -193,9 +360,13 @@ export function startLoopback(preserveTimeline = false, adoptVad?: VadSegmenter)
 		totalFrames = 0;
 		captureSampleRate = 0;
 		trackSamples = [];
+		sampleStretch = [];
+		stretches = [];
 		trackSegments = [];
 		energySamples = [];
 		trackStartT = 0;
+		lastPairClass = null;
+		evidenceCutCap = -Infinity;
 		pipeline = null; // built on the first chunk (needs the real sample rate)
 	}
 	lastChunkWall = Date.now();
@@ -238,9 +409,15 @@ export function startLoopback(preserveTimeline = false, adoptVad?: VadSegmenter)
 		const wasActive = pipeline.vad.active;
 		// isolator → VLS scorer → VAD, per 20ms sub-frames
 		const res = pipeline.onChunk(samples, chunk.channels, frames, tStart);
-		for (const e of res.energy) energySamples.push(e);
+		for (const e of res.energy) {
+			// strict >: a sub-frame at exactly the cut instant straddles the
+			// seek — the boundary rule would map it to the pre-seek position
+			// and the monotone dedupe in getTrackEnergy would then swallow
+			// every post-seek sample after it
+			if (e.t > evidenceCutCap) energySamples.push(e);
+		}
 		if (energySamples.length > 100000) energySamples.splice(0, 50000);
-		if (res.segment) {
+		if (res.segment && res.segment.end > evidenceCutCap) {
 			console.log(`[vad] segment ${fmtSegment(res.segment)}`);
 			trackSegments.push(res.segment);
 		}
@@ -283,7 +460,7 @@ export function stopLoopback(): void {
 
 // while the capture was dead the poll loop kept recording clock samples
 // with a frozen captureT — collapse those runs to a single sample so the
-// piecewise-linear clock doesn't accumulate zero-slope junk
+// stretch clock doesn't accumulate zero-baseline junk
 function pruneFrozenSamples(): void {
 	if (trackSamples.length < 2) return;
 	const out: TrackSample[] = [trackSamples[0]];
@@ -297,6 +474,8 @@ function pruneFrozenSamples(): void {
 	if (dropped > 0) {
 		console.log(`[loopback] watchdog: pruned ${dropped} frozen clock samples`);
 	}
+	// the surviving pairs now span the dead gap — reclassify and refit
+	rebuildClock();
 }
 
 // replace the dead WASAPI instance while keeping the capture timeline:

@@ -9,7 +9,7 @@ import { buildIndex, findTrack, LibraryIndex } from "./library";
 import { parseLrc, decodeLrcBuffer } from "./lrc";
 import { extractPalette } from "./palette";
 import { getFallbackCover, artWidth } from "./cover";
-import { lookupLyrics, pursueLrclib, verifyLrclib, clearLyricsCache, saveAlignedLyrics, lyricsCacheStats, clearAllLyricsCache } from "./lrclib";
+import { lookupLyrics, pursueLrclib, pursueGenius, verifyLrclib, clearLyricsCache, saveAlignedLyrics, lyricsCacheStats, clearAllLyricsCache } from "./lrclib";
 import { startLoopback, stopLoopback, beginTrack, noteTrackPosition, getTrackSegments, getTrackEnergy, checkLoopbackWatchdog } from "./loopback";
 import { alignLyrics, AlignStats, AnchorLocker } from "./align";
 
@@ -31,7 +31,7 @@ interface TrackPayload {
 
 let win: BrowserWindow | null = null;
 let watcher: MediaWatcher | null = null;
-let config: AuraConfig = { musicFolders: [] };
+let config: AuraConfig = { musicFolders: [], seenApps: [] };
 let index: LibraryIndex = { tracks: [], indexedAt: 0 };
 
 let lastTrackId: string | null = null;
@@ -61,6 +61,9 @@ let alignSource: string | null = null;            // where the plain text came f
 let alignCacheable = false;   // online-sourced — the aligned result may be cached
 let alignSyncedSeen = false;  // a synced version was delivered — alignment off
 let alignLastRun = 0;         // throttle for live re-alignment
+let alignLastPos = -1;        // position of the last DP run (pause skip)
+let alignMaxPos = 0;          // furthest SMTC position seen while aligning —
+                              // completion metric of the cache quality gate
 
 // Anchor Locking (план item 4): passed lines with a stable segment binding
 // freeze — later DP runs solve only the remainder, so the highlight never
@@ -145,6 +148,8 @@ function enterAlignment(lines: { text: string }[], source: string, cacheable: bo
 	alignSource = source;
 	alignCacheable = cacheable;
 	alignLastRun = 0;
+	alignLastPos = -1;
+	alignMaxPos = 0;
 	alignLocker.reset();
 	// the live alignment is a switchable source — pending until its first
 	// output, ready from then on
@@ -175,16 +180,34 @@ function finalizeAlignment(): void {
 	const stats: Partial<AlignStats> = {};
 	const aligned = alignLyrics(lines, segs, trackLength, getTrackEnergy(), stats);
 	if (aligned.length < 3) return;
-	// quality gate: a partial listen (track skipped early) produces a
-	// garbage alignment that would poison the cache for every future play.
-	// progress — how far into the track the vocal evidence reaches;
-	// coverage — heard vocal time vs the expected sung duration
+	// quality gate (план item 6): a garbage alignment must never poison the
+	// cache for every future play of the track. Each metric rejects a known
+	// failure mode: completion — a partial listen (position never reached
+	// the end) produces cram-and-drift garbage; vocal coverage — heard vocal
+	// time vs expected sung time (a dead WASAPI capture starves it while the
+	// position still advances); anchored — lines backed by real VAD
+	// segments, not interpolation; normCost — DP cost per second of
+	// evidence; duration — no anomalously short/long lines; monotone —
+	// start times strictly rise
 	const heard = segs.reduce((s, g) => s + (g.end - g.start), 0);
-	const lastEnd = segs.reduce((m, g) => Math.max(m, g.end), 0);
-	const progress = trackLength > 0 ? lastEnd / trackLength : 1;
-	const coverage = stats.expected ? heard / stats.expected : 1;
-	if (progress < 0.75 || coverage < 0.4) {
-		console.log(`[align] "${lastTrackTitle}" — quality gate: progress ${(progress * 100).toFixed(0)}%, coverage ${(coverage * 100).toFixed(0)}% — partial listen, not cached`);
+	const completion = trackLength > 0 ? alignMaxPos / trackLength : 1;
+	const vocalCoverage = stats.expected ? heard / stats.expected : 1;
+	const anchoredFrac = aligned.length ? (stats.anchored ?? 0) / aligned.length : 0;
+	const normCost = stats.normCost ?? Infinity;
+	let durationOk = true;
+	let monotoneOk = true;
+	for (let k = 0; k < aligned.length; k++) {
+		const d = (stats.lineEnd?.[k] ?? -1) - aligned[k].time;
+		if (d >= 0 && (d < 0.6 || d > 12.0)) durationOk = false;
+		if (k > 0 && aligned[k].time <= aligned[k - 1].time) monotoneOk = false;
+	}
+	if (
+		completion < 0.88 || vocalCoverage < 0.4 || anchoredFrac < 0.8 ||
+		normCost > 0.45 || !durationOk || !monotoneOk
+	) {
+		console.log(
+			`[align] "${lastTrackTitle}" — quality gate: completion ${(completion * 100).toFixed(0)}%, vocal coverage ${(vocalCoverage * 100).toFixed(0)}%, anchored ${(anchoredFrac * 100).toFixed(0)}%, normCost ${normCost === Infinity ? "n/a" : normCost.toFixed(2)}, duration ${durationOk ? "ok" : "bad"}, monotone ${monotoneOk ? "ok" : "bad"} — not cached`
+		);
 		return;
 	}
 	const wrote = saveAlignedLyrics(lastTrackArtist || undefined, lastTrackTitle, aligned);
@@ -201,9 +224,16 @@ function maybeRunAlignment(position: number): void {
 	if (!alignLines || alignSyncedSeen) return;
 	if (!win || win.isDestroyed()) return;
 	const now = Date.now();
+	// the locker sees every tick — seek detection needs the 500ms
+	// granularity, not the 5s alignment cadence
+	alignLocker.onClock(position, now);
+	if (position > alignMaxPos) alignMaxPos = position;
 	if (now - alignLastRun < ALIGN_INTERVAL) return;
 	alignLastRun = now;
-	alignLocker.onClock(position, now);
+	// paused (position frozen): no new vocal evidence can arrive — skip
+	// the DP re-run (it produced identical output every 5s)
+	if (Math.abs(position - alignLastPos) < 0.05) return;
+	alignLastPos = position;
 	const segs = getTrackSegments();
 	if (segs.length < ALIGN_MIN_SEGMENTS) return;
 	const stats: Partial<AlignStats> = {};
@@ -299,7 +329,12 @@ function launchLyricsLookup(id: string, title?: string, artist?: string, duratio
 		// recovers the other sources for the switcher — arrows appear as
 		// they land, the screen stays on the cached version
 		if (outcome.fromCache && result) {
-			void lookupLyrics(title, artist || undefined, duration || undefined, config.geniusToken, strict, true).then((fresh) => {
+			// the cached verdict already holds the Genius text ("Genius", or
+			// an "aura" alignment built on it) — re-querying Genius recovers
+			// nothing for the switcher and doubles the request volume that
+			// gets us rate-limited; only Lrclib needs recovering
+			const skipGenius = result.source === "Genius" || result.source === "aura";
+			void lookupLyrics(title, artist || undefined, duration || undefined, config.geniusToken, strict, true, skipGenius).then((fresh) => {
 				if (!win || win.isDestroyed() || lastTrackId !== id || token !== lyricsJobToken) return;
 				for (const cand of fresh.candidates) {
 					upsertSource({
@@ -313,8 +348,37 @@ function launchLyricsLookup(id: string, title?: string, artist?: string, duratio
 				}
 			});
 		}
-		console.log(`[lyrics] "${title}" — ${artist || "?"} (dur=${Math.round(duration || 0)}s): ${result ? (result.instrumental ? `${result.source} (instrumental)` : `${result.source} (${result.synchronized ? "synced" : "plain"}, ${result.lines.length} lines)`) : "not found anywhere"}${outcome.lrclibPending ? " [lrclib pending — pursuing in background]" : ""}${outcome.lrclibVerify ? " [lrclib re-check scheduled]" : ""}`);
+		console.log(`[lyrics] "${title}" — ${artist || "?"} (dur=${Math.round(duration || 0)}s): ${result ? (result.instrumental ? `${result.source} (instrumental)` : `${result.source} (${result.synchronized ? "synced" : "plain"}, ${result.lines.length} lines)`) : "not found anywhere"}${outcome.lrclibPending ? " [lrclib pending — pursuing in background]" : ""}${outcome.lrclibVerify ? " [lrclib re-check scheduled]" : ""}${outcome.geniusPending ? " [genius pending — retrying in background]" : ""}`);
 		displayLyricsEvent(result ? result.source : null, result ? result.source : null, result ? { lines: result.lines, synchronized: result.synchronized, instrumental: result.instrumental || undefined } : null);
+		if (outcome.geniusPending && config.geniusToken) {
+			// Genius answered transiently (403 rate limit / timeout) — keep
+			// retrying it in the background; when it finally answers, the
+			// missing text lands on screen (or joins the switcher next to
+			// the Lrclib plain text, which stays the priority winner)
+			void pursueGenius(title, artist || undefined, strict, config.geniusToken, result, (upgrade) => {
+				if (!upgrade) return; // fallback stands (cached where definitive)
+				if (!win || win.isDestroyed() || lastTrackId !== id || token !== lyricsJobToken) return;
+				console.log(`[lyrics] "${title}" — ${artist || "?"}: Genius late upgrade (${upgrade.lines.length} lines)`);
+				// a late Lrclib upgrade (pursue/verify) may have landed first —
+				// synced Lrclib outranks plain Genius, never steal its screen
+				if (!result && !lyricsFromLrclib) {
+					// nothing was on screen — the late Genius text takes it
+					// and aligns live, exactly like a fresh plain-text hit
+					enterAlignment(upgrade.lines, "Genius", true);
+				}
+				upsertSource({
+					id: "Genius",
+					name: "Genius",
+					status: "ready",
+					synchronized: upgrade.synchronized,
+					instrumental: upgrade.instrumental,
+					lines: upgrade.lines
+				});
+				if (!result && !lyricsFromLrclib) {
+					displayLyricsEvent("Genius", "Genius", { lines: upgrade.lines, synchronized: upgrade.synchronized, instrumental: upgrade.instrumental || undefined });
+				}
+			});
+		}
 		if (outcome.lrclibPending) {
 			// Lrclib answered transiently — keep retrying it in the background;
 			// when it finally answers, upgrade the display to the synced version
@@ -361,8 +425,29 @@ function launchLyricsLookup(id: string, title?: string, artist?: string, duratio
 	});
 }
 
-async function handleUpdate(update: Update | null): Promise<void> {
-	if (!win || win.isDestroyed()) return;
+// every app that ever held the current SMTC session lands in the settings'
+// "Игнорировать" list — including ignored ones (to be un-ignored later).
+// New apps are persisted at once; lastSeen is kept in memory and flushed
+// on quit (a 500ms poll must not hammer the disk)
+function recordSeenApp(update: Update): void {
+	if (!update.app) return;
+	const now = Date.now();
+	let entry = config.seenApps.find((a) => a.app === update.app);
+	if (!entry) {
+		config.seenApps.push({ app: update.app, appName: update.appName || update.app, lastSeen: now });
+		saveConfig(config);
+	} else {
+		entry.appName = update.appName || entry.appName;
+		entry.lastSeen = now;
+	}
+}
+
+function isIgnoredApp(app: string): boolean {
+	return (config.ignoredApps || []).some((a) => a.toLowerCase() === app.toLowerCase());
+}
+
+async function handleUpdate(update: Update | null): Promise<boolean> {
+	if (!win || win.isDestroyed()) return true;
 
 	if (!update) {
 		// media sessions can momentarily disappear (e.g. Yandex Music) —
@@ -383,9 +468,14 @@ async function handleUpdate(update: Update | null): Promise<void> {
 			lyricsJobToken++;
 			win.webContents.send("track", { empty: true } as TrackPayload);
 		}
-		return;
+		return true;
 	}
 	nullStreak = 0;
+	recordSeenApp(update);
+	// an ignored app (e.g. a messenger's voice messages) must not steal the
+	// screen, restart lookups, or feed its positions into the track clock —
+	// freeze on the last real track until a followed app is current again
+	if (isIgnoredApp(update.app)) return false;
 
 	const id = update.metadata.id;
 	const smtcArt: Buffer | null = update.metadata.artData?.data?.length
@@ -545,6 +635,7 @@ async function handleUpdate(update: Update | null): Promise<void> {
 		}
 	}
 	lastStatus = update.status;
+	return true;
 }
 
 async function rebuildIndex(): Promise<void> {
@@ -570,12 +661,9 @@ function createWindow(): void {
 		minHeight: 560,
 		backgroundColor: "#161513",
 		autoHideMenuBar: true,
+		// no native overlay: the window controls are drawn by the renderer
+		// (fully transparent, blending into the fluid background)
 		titleBarStyle: "hidden",
-		titleBarOverlay: {
-			color: "#161513",
-			symbolColor: "#f5f5f4",
-			height: 36
-		},
 		webPreferences: {
 			contextIsolation: true,
 			preload: path.join(__dirname, "preload.js")
@@ -595,6 +683,14 @@ function createWindow(): void {
 	win.on("leave-full-screen", () => {
 		if (win && !win.isDestroyed()) win.webContents.send("fullscreen", false);
 	});
+	// custom window controls: the renderer's maximize button flips between
+	// "maximize" and "restore" — keep it in sync with the real window state
+	const sendMaximized = () => {
+		if (win && !win.isDestroyed()) win.webContents.send("win-maximized", win.isMaximized());
+	};
+	win.on("maximize", sendMaximized);
+	win.on("unmaximize", sendMaximized);
+	win.webContents.once("did-finish-load", sendMaximized);
 }
 
 function registerIpc(): void {
@@ -626,6 +722,28 @@ function registerIpc(): void {
 	});
 
 	ipcMain.handle("cache:stats", () => lyricsCacheStats());
+
+	// settings' "Игнорировать" section: every app seen holding the current
+	// SMTC session, newest first, with its ignore state
+	function appsListPayload() {
+		return {
+			apps: [...(config.seenApps || [])]
+				.sort((a, b) => b.lastSeen - a.lastSeen)
+				.map((a) => ({ app: a.app, appName: a.appName, ignored: isIgnoredApp(a.app) }))
+		};
+	}
+
+	ipcMain.handle("apps:list", () => appsListPayload());
+
+	ipcMain.handle("apps:toggle-ignore", (_e, app: string) => {
+		if (typeof app !== "string" || !app) return appsListPayload();
+		const list = config.ignoredApps || (config.ignoredApps = []);
+		const i = list.findIndex((a) => a.toLowerCase() === app.toLowerCase());
+		if (i >= 0) list.splice(i, 1);
+		else list.push(app);
+		saveConfig(config);
+		return appsListPayload();
+	});
 
 	// settings: wipe the whole lyrics cache. The current track's verdict is
 	// gone too — when its text came from the online chain, restart the whole
@@ -659,15 +777,16 @@ function registerIpc(): void {
 		if (win && !win.isDestroyed()) win.setFullScreen(!win.isFullScreen());
 	});
 
-	// the renderer recolors the native title-bar overlay to match the palette
-	ipcMain.on("titlebar", (_e, colors: { color: string; symbolColor: string }) => {
-		if (win && !win.isDestroyed()) {
-			try {
-				win.setTitleBarOverlay(colors);
-			} catch (_e) {
-				// overlay not available (e.g. unsupported platform) — ignore
-			}
-		}
+	// custom window controls (renderer-drawn, transparent): minimize /
+	// maximize-toggle / close — the native overlay was removed because its
+	// solid color strip stood out against the animated fluid background
+	ipcMain.on("win-control", (_e, action: string) => {
+		if (!win || win.isDestroyed()) return;
+		if (action === "minimize") win.minimize();
+		else if (action === "maximize") {
+			if (win.isMaximized()) win.unmaximize();
+			else win.maximize();
+		} else if (action === "close") win.close();
 	});
 
 	// "wrong lyrics" — drop every cached verdict for the current track and
@@ -742,8 +861,10 @@ app.whenReady().then(async () => {
 		if (!watcher || !win || win.isDestroyed()) return;
 		try {
 			const update = await watcher.getUpdate();
-			await handleUpdate(update);
-			if (update && lastTrackId !== null) {
+			const processed = await handleUpdate(update);
+			// a frozen (ignored) session must not feed its positions into
+			// the track clock, the aligner, or the seekbar either
+			if (processed && update && lastTrackId !== null) {
 				// GetPosition extrapolates by time since the player's last
 				// timeline update — raw update.elapsed is stale between those
 				// and makes the lyrics jitter back and forth
@@ -778,4 +899,7 @@ app.on("window-all-closed", () => {
 app.on("will-quit", () => {
 	finalizeAlignment();
 	stopLoopback();
+	// flush the seen-apps registry's lastSeen updates (new apps are saved
+	// the moment they appear; this covers the in-memory refreshes)
+	saveConfig(config);
 });

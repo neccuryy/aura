@@ -305,6 +305,10 @@ export interface LookupOutcome {
 	// Lrclib's "no" occasionally flakes (empty search with 200), so the caller
 	// schedules one background re-check to catch it
 	lrclibVerify: boolean;
+	// true when Genius answered transiently (403 rate limit / timeout) —
+	// the caller should keep retrying it in the background and land the
+	// missing text when it finally answers
+	geniusPending: boolean;
 }
 
 // full pipeline: Lrclib first (synced lyrics when available), then Genius
@@ -319,21 +323,26 @@ export async function lookupLyrics(
 	// true = read-only re-search for the switcher: skip the cache read (we
 	// already show the cached verdict) and never write the cache (the fresh
 	// online answer must not overwrite the saved aura alignment)
-	fresh = false
+	fresh = false,
+	// true = hold the Genius query: the caller already holds the Genius text
+	// (a cached "Genius" verdict, or an "aura" alignment built on it) —
+	// re-querying Genius recovers nothing for the switcher and doubles the
+	// request volume that gets us rate-limited
+	skipGenius = false
 ): Promise<LookupOutcome> {
-	if (!title) return { result: null, candidates: [], fromCache: false, lrclibPending: false, lrclibVerify: false };
+	if (!title) return { result: null, candidates: [], fromCache: false, lrclibPending: false, lrclibVerify: false, geniusPending: false };
 
 	if (!fresh) {
 		const cached = readCache(artist, title);
-		if (cached) return { result: cached, candidates: [cached], fromCache: true, lrclibPending: false, lrclibVerify: false };
-		if (hasMiss(artist, title)) return { result: null, candidates: [], fromCache: true, lrclibPending: false, lrclibVerify: false };
+		if (cached) return { result: cached, candidates: [cached], fromCache: true, lrclibPending: false, lrclibVerify: false, geniusPending: false };
+		if (hasMiss(artist, title)) return { result: null, candidates: [], fromCache: true, lrclibPending: false, lrclibVerify: false, geniusPending: false };
 	}
 
 	const lrclib = await fetchFromLrclib(title, artist, duration, strict);
 	const lrclibHit = lrclib.result;
 	if (lrclibHit && (lrclibHit.synchronized || lrclibHit.instrumental)) {
 		if (!fresh) writeCache(artist, title, lrclibHit, true);
-		return { result: lrclibHit, candidates: [lrclibHit], fromCache: false, lrclibPending: false, lrclibVerify: false };
+		return { result: lrclibHit, candidates: [lrclibHit], fromCache: false, lrclibPending: false, lrclibVerify: false, geniusPending: false };
 	}
 
 	// Lrclib gave plain text (or nothing) — Genius is both the fallback and
@@ -341,10 +350,14 @@ export async function lookupLyrics(
 	// above skips Genius entirely (nothing there can beat synced timings)
 	let geniusResult: OnlineLyrics | null = null;
 	let geniusDefinitive = true; // no token → Genius doesn't affect the verdict
-	if (geniusToken) {
+	let geniusPending = false;
+	if (geniusToken && !skipGenius) {
 		const genius = await getGeniusLyrics(title, artist, geniusToken, strict);
 		if (genius.result) geniusResult = genius.result;
-		else geniusDefinitive = genius.definitive;
+		else {
+			geniusDefinitive = genius.definitive;
+			geniusPending = !genius.definitive;
+		}
 	}
 	const candidates: OnlineLyrics[] = [];
 	if (lrclib.result) candidates.push(lrclib.result);
@@ -354,7 +367,7 @@ export async function lookupLyrics(
 		// Lrclib never actually answered — show whatever Genius found but
 		// cache nothing; the caller runs pursueLrclib to keep trying for
 		// the synced version
-		return { result: geniusResult, candidates, fromCache: false, lrclibPending: true, lrclibVerify: false };
+		return { result: geniusResult, candidates, fromCache: false, lrclibPending: true, lrclibVerify: false, geniusPending };
 	}
 
 	// negative-cache only when the whole pipeline answered definitively —
@@ -368,7 +381,8 @@ export async function lookupLyrics(
 		candidates,
 		fromCache: false,
 		lrclibPending: false,
-		lrclibVerify: !!geniusResult && !lrclib.result
+		lrclibVerify: !!geniusResult && !lrclib.result,
+		geniusPending
 	};
 }
 
@@ -403,7 +417,48 @@ export async function pursueLrclib(
 			return;
 		}
 		if (lrclib.definitive) {
-			writeCache(artist, title, fallback, true);
+			// a null fallback must not write a .miss — Genius may still be
+			// transiently failing (its own background pursue may be running);
+			// let the Genius retry settle the final verdict
+			if (fallback) writeCache(artist, title, fallback, true);
+			onResolved(null);
+			return;
+		}
+	}
+	onResolved(null);
+}
+
+// first retry soon — a Genius 403 rate limit often clears within seconds —
+// then back off
+const GENIUS_PURSUE_DELAYS = [5000, 20000, 60000];
+
+// Background Genius priority: Genius answered transiently (403 rate limit,
+// timeout) while the screen shows the fallback (Lrclib plain text or the
+// "not found" note) — keep retrying Genius. When it finally answers: a hit
+// becomes the cached verdict when there is no fallback at all (and the
+// caller upgrades the display), or just a switcher candidate next to the
+// Lrclib text; a definitive miss confirms the fallback; exhaustion leaves
+// the cache as is so the next play retries the whole chain naturally.
+export async function pursueGenius(
+	title: string,
+	artist: string | undefined,
+	strict: boolean,
+	geniusToken: string,
+	fallback: OnlineLyrics | null,
+	onResolved: (upgrade: OnlineLyrics | null) => void
+): Promise<void> {
+	for (const delay of GENIUS_PURSUE_DELAYS) {
+		await sleep(delay);
+		const genius = await getGeniusLyrics(title, artist, geniusToken, strict);
+		if (genius.result) {
+			// Lrclib plain text stays the priority winner — Genius only
+			// becomes the cached verdict when there is no fallback at all
+			writeCache(artist, title, fallback ?? genius.result, true);
+			onResolved(genius.result);
+			return;
+		}
+		if (genius.definitive) {
+			if (fallback) writeCache(artist, title, fallback, true);
 			onResolved(null);
 			return;
 		}

@@ -54,10 +54,10 @@ const el = {
 	btnSettings: document.getElementById("btn-settings"),
 	btnAddFolder: document.getElementById("btn-add-folder"),
 	btnReindex: document.getElementById("btn-reindex"),
-	btnCloseSettings: document.getElementById("btn-close-settings"),
 	indexStats: document.getElementById("index-stats"),
 	cacheStats: document.getElementById("cache-stats"),
-	btnClearCache: document.getElementById("btn-clear-cache")
+	btnClearCache: document.getElementById("btn-clear-cache"),
+	ignoreList: document.getElementById("ignore-list")
 };
 
 /* ---------- helpers ---------- */
@@ -107,8 +107,6 @@ function applyPalette(palette) {
 			shade(dv, -0.3) || bg1
 		);
 	}
-	// recolor the native window-controls overlay to blend with the background
-	if (api.setTitlebarColor) api.setTitlebarColor(bg2, "#f5f5f4");
 }
 
 /* ---------- lyrics rendering ---------- */
@@ -477,6 +475,34 @@ function renderCacheStats(stats) {
 		stats.files + " " + plural(stats.files, ["файл", "файла", "файлов"]) + " · " + fmtBytes(stats.bytes);
 }
 
+function renderIgnoreList(data) {
+	el.ignoreList.innerHTML = "";
+	if (!data.apps.length) {
+		const li = document.createElement("li");
+		li.className = "empty";
+		li.textContent = "Пока пусто — источники появятся, когда что-то заиграет";
+		el.ignoreList.appendChild(li);
+		return;
+	}
+	for (const a of data.apps) {
+		const li = document.createElement("li");
+		const name = document.createElement("span");
+		name.className = "app-name";
+		name.textContent = a.appName;
+		const sw = document.createElement("button");
+		sw.className = "switch";
+		sw.setAttribute("role", "switch");
+		sw.setAttribute("aria-checked", String(a.ignored));
+		sw.title = a.ignored ? "Перестать игнорировать" : "Игнорировать этот источник";
+		sw.addEventListener("click", async () => {
+			renderIgnoreList(await api.toggleAppIgnore(a.app));
+		});
+		li.appendChild(name);
+		li.appendChild(sw);
+		el.ignoreList.appendChild(li);
+	}
+}
+
 function plural(n, forms) {
 	const n10 = n % 10;
 	const n100 = n % 100;
@@ -488,10 +514,9 @@ function plural(n, forms) {
 el.btnSettings.addEventListener("click", async () => {
 	renderSettings(await api.getConfig());
 	renderCacheStats(await api.cacheStats());
+	renderIgnoreList(await api.listApps());
 	el.settings.classList.remove("hidden");
 });
-
-el.btnCloseSettings.addEventListener("click", () => el.settings.classList.add("hidden"));
 
 el.btnAddFolder.addEventListener("click", async () => {
 	renderSettings(await api.pickFolder());
@@ -553,6 +578,26 @@ document.addEventListener("keydown", (e) => {
 
 api.onFullscreen((data) => {
 	document.body.classList.toggle("fullscreen", !!data);
+});
+
+/* ---------- custom window controls ---------- */
+
+// renderer-drawn minimize / maximize / close — the native overlay was a
+// solid-color strip that stood out against the animated background
+el.winMin = document.getElementById("win-min");
+el.winMax = document.getElementById("win-max");
+el.winClose = document.getElementById("win-close");
+el.iconWinMax = document.getElementById("icon-win-max");
+el.iconWinRestore = document.getElementById("icon-win-restore");
+
+el.winMin.addEventListener("click", () => api.winControl("minimize"));
+el.winMax.addEventListener("click", () => api.winControl("maximize"));
+el.winClose.addEventListener("click", () => api.winControl("close"));
+
+api.onWinMaximized((maximized) => {
+	el.iconWinMax.classList.toggle("hidden", maximized);
+	el.iconWinRestore.classList.toggle("hidden", !maximized);
+	el.winMax.title = maximized ? "Восстановить" : "Развернуть";
 });
 
 /* ---------- auto-update ---------- */

@@ -26,7 +26,9 @@ export interface GeniusOutcome {
 	definitive: boolean;
 }
 
-const REQUEST_TIMEOUT = 8000;
+// Genius under load answers 200s very slowly (observed ~22s) — a tight
+// timeout discards those slow-but-valid responses as transient failures
+const REQUEST_TIMEOUT = 20000;
 const BROWSER_UA =
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 

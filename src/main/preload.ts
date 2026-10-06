@@ -13,6 +13,10 @@ const api = {
 		ipcRenderer.invoke("cache:stats"),
 	clearCache: (): Promise<{ files: number; bytes: number }> =>
 		ipcRenderer.invoke("cache:clear"),
+	listApps: (): Promise<{ apps: { app: string; appName: string; ignored: boolean }[] }> =>
+		ipcRenderer.invoke("apps:list"),
+	toggleAppIgnore: (app: string): Promise<{ apps: { app: string; appName: string; ignored: boolean }[] }> =>
+		ipcRenderer.invoke("apps:toggle-ignore", app),
 	onTrack: (cb: (data: unknown) => void): void => {
 		ipcRenderer.on("track", (_e, data) => cb(data));
 	},
@@ -39,8 +43,11 @@ const api = {
 	previous: (): void => ipcRenderer.send("control", "previous"),
 	seek: (seconds: number): void => ipcRenderer.send("control:seek", seconds),
 	toggleFullscreen: (): void => ipcRenderer.send("control:fullscreen"),
-	setTitlebarColor: (color: string, symbolColor: string): void =>
-		ipcRenderer.send("titlebar", { color, symbolColor }),
+	winControl: (action: "minimize" | "maximize" | "close"): void =>
+		ipcRenderer.send("win-control", action),
+	onWinMaximized: (cb: (maximized: boolean) => void): void => {
+		ipcRenderer.on("win-maximized", (_e, maximized) => cb(maximized));
+	},
 	onFullscreen: (cb: (data: unknown) => void): void => {
 		ipcRenderer.on("fullscreen", (_e, data) => cb(data));
 	},

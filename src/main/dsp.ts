@@ -239,6 +239,14 @@ export class VocalPipeline {
 	flush(): VocalSegment | null {
 		return this.vad.flush();
 	}
+
+	// seek: the track position jumped, so the open segment's timeline is
+	// cut at the seek moment — the pre-seek part is delivered immediately
+	// (no merge delay: merging it with post-seek vocals would create one
+	// segment spanning the jump), and the segment restarts at t
+	splitAt(t: number): VocalSegment[] {
+		return this.vad.splitAt(t);
+	}
 }
 
 // Hysteresis VAD over variable-duration frames of vocal-band RMS.
@@ -347,6 +355,26 @@ export class VadSegmenter {
 	flush(): VocalSegment | null {
 		if (this.inSegment) this.close(this.lastT);
 		const out = this.pending;
+		this.pending = null;
+		return out;
+	}
+
+	// seek cut: deliver the pre-seek part of the open segment (plus any
+	// merge-delayed segment) immediately and restart the segment at t —
+	// the vocals continue, but on the other side of the position jump
+	splitAt(t: number): VocalSegment[] {
+		if (!this.inSegment) {
+			const out = this.pending ? [this.pending] : [];
+			this.pending = null;
+			return out;
+		}
+		const seg: VocalSegment = { start: this.segStart, end: t };
+		this.segStart = t;
+		this.aboveTime = 0;
+		this.belowTime = 0;
+		const out: VocalSegment[] = [];
+		if (this.pending) out.push(this.pending);
+		if (seg.end - seg.start >= MIN_SEGMENT) out.push(seg);
 		this.pending = null;
 		return out;
 	}

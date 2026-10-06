@@ -97,6 +97,15 @@ export const W_FILL_FLAT = 2.0;    // per second of flat segment covered by a gr
 // wall time between groups — pricing it kills the whole cascade.
 export const W_GAP_EXCESS = 1.5;  // per second of unexplained inter-group gap
 const GAP_FREE = 2.0; // s — normal inter-line/inter-section pause
+// pass-1 inter-super silence: only this much gap excess beyond GAP_FREE is
+// chargeable per boundary. The old DP's gap prior was LOCAL (3-segment
+// lookback, avoidable by anchoring mid-super) — jumping a long break was
+// free, and that locality was load-bearing: on sparse-VAD tracks the breaks
+// are real (instrumental sections) or undetected vocals, and charging them
+// in full makes cramming every line into the earliest supers cheaper
+// (игрушка: 59 lines into one 5s super). Short unexplained gaps still
+// charge — drift within a section stays expensive
+const SILENCE_CAP = 4.0; // s of chargeable gap excess per boundary
 
 // Two-Pass DP (план item 7): pass 1 aligns line BLOCKS (куплеты/припевы) to
 // super-segments — VAD segments merged across pauses ≤ SUPER_GAP. Pauses
@@ -562,8 +571,15 @@ export function pass1Solve(
 		// inter-super silence: wall time between consecutive supers beyond
 		// the free pause — charged only once singing has started (a = 1).
 		// Per-boundary GAP_FREE errs cheaper than one gap over the whole
-		// skipped run — the same locality the old lookbackGapExcess had
-		const silence = u > 0 ? W_GAP_EXCESS * Math.max(0, sup.start - supers[u - 1].end - GAP_FREE) : 0;
+		// skipped run — the same locality the old lookbackGapExcess had.
+		// Capped at SILENCE_CAP: long breaks are real or undetected vocals,
+		// free to jump (the old DP's lookback never saw them either). The
+		// take-move credits the gap with the block's underflow (old DP's
+		// skippedExp semantics, block-level): the lines pass 2 will skip
+		// inside the block sing in the gap BEFORE the block's super —
+		// fillGaps seats them between the previous anchor and this block
+		const gapExcess = u > 0 ? Math.max(0, sup.start - supers[u - 1].end - GAP_FREE) : 0;
+		const silSkip = W_GAP_EXCESS * Math.min(gapExcess, SILENCE_CAP);
 		const skipCost = (W_SKIP_BASE + W_SKIP_VOCAL * sup.voc) * sup.sung;
 		const flat = W_FILL_FLAT * (1 - sup.voc) * sup.sung;
 		const E = sup.j1 - sup.j0;
@@ -571,18 +587,28 @@ export function pass1Solve(
 			for (let a = 0; a < 2; a++) {
 				const cur = dp[u][i][a];
 				if (cur === INF) continue;
-				const sil = a === 1 ? silence : 0;
 				// skip super u — unexplained vocals
-				const c0 = cur + sil + skipCost;
+				const c0 = cur + (a === 1 ? silSkip : 0) + skipCost;
 				if (c0 < dp[u + 1][i][a]) {
 					dp[u + 1][i][a] = c0;
 					mv[u + 1][i][a] = 0;
 					pm[u + 1][i][a] = i * 2 + a;
 				}
-				// super u takes lines [i, i+k) — duration match at block level
+				// super u takes lines [i, i+k) — duration match at block level.
+				// Capacity cap: pass 2 seats at most MAX_LINES_PER_SEGMENT lines
+				// per segment, so a super of E segments can't honestly take more
+				// than E×that — without the cap the cheap block-level underflow
+				// price (0.35/s) makes one giant cram cheaper than skipping
+				// lines (1.0/s), and 59 lines land in one 5s super (игрушка)
+				const cap = (sup.j1 - sup.j0) * MAX_LINES_PER_SEGMENT;
 				let sum = 0;
-				for (let k = 1; i + k <= nLines; k++) {
+				for (let k = 1; i + k <= nLines && k <= cap; k++) {
 					sum += exp[i + k - 1];
+					// the block's skipped lines explain the gap before it
+					const silTake =
+						a === 1
+							? W_GAP_EXCESS * Math.min(Math.max(0, gapExcess - Math.max(0, sum - sup.sung)), SILENCE_CAP)
+							: 0;
 					// surplus segs: k lines can't anchor E > k segs
 					// one-per-line — the leftovers must be skipped or absorbed
 					// by spanning lines; price them at the (optimistic) skip
@@ -595,7 +621,7 @@ export function pass1Solve(
 						for (let x = 0; x < E - k; x++) sur += sup.dursAsc[x];
 						sur *= W_SKIP_BASE + W_SKIP_VOCAL * sup.voc;
 					}
-					const c = cur + sil + mismatchCost(sup.sung, sum) + flat + sur;
+					const c = cur + silTake + mismatchCost(sup.sung, sum) + flat + sur;
 					if (c < dp[u + 1][i + k][1]) {
 						dp[u + 1][i + k][1] = c;
 						mv[u + 1][i + k][1] = k;
@@ -849,22 +875,31 @@ export function alignLyrics(
 				// boundary costs mirroring pass 1's charges: skipped supers'
 				// skip price, silence at every decided super boundary except
 				// the trailing close-out (unanchored outro pays no silence —
-				// old DP semantics). Pass-1 assign mismatches are excluded —
-				// pass 2 already prices what the blocks fit — keeping the
-				// normCost scale comparable to the gate (0.45)
+				// old DP semantics). Assigned boundaries get the block's
+				// underflow credit (pass 1's silTake), recomputed at the
+				// pass-1 rate. Pass-1 assign mismatches are excluded — pass 2
+				// already prices what the blocks fit — keeping the normCost
+				// scale comparable to the gate (0.45)
+				const blockOf = new Map<number, Pass1Block>();
+				for (const b of p1.blocks) blockOf.set(supers.findIndex((s) => s.j0 === b.j0), b);
 				let assignedBefore = false;
 				for (let u = 0; u < supers.length; u++) {
 					const sup = supers[u];
-					const silence =
+					const gapExcess =
 						assignedBefore && u > 0
-							? W_GAP_EXCESS * Math.max(0, sup.start - supers[u - 1].end - GAP_FREE)
+							? Math.max(0, sup.start - supers[u - 1].end - GAP_FREE)
 							: 0;
 					if (p1.assigned[u]) {
-						cost += silence;
+						const b = blockOf.get(u);
+						let sum = 0;
+						if (b) for (let i = b.i0; i < b.i1; i++) sum += expectedDuration(sylls[i], bestRate);
+						cost +=
+							W_GAP_EXCESS *
+							Math.min(Math.max(0, gapExcess - (b ? Math.max(0, sum - sup.sung) : 0)), SILENCE_CAP);
 						assignedBefore = true;
 					} else {
 						cost += (W_SKIP_BASE + W_SKIP_VOCAL * sup.voc) * sup.sung;
-						if (u < p1.end) cost += silence;
+						if (u < p1.end) cost += W_GAP_EXCESS * Math.min(gapExcess, SILENCE_CAP);
 					}
 				}
 			}
@@ -1003,13 +1038,14 @@ export class AnchorLocker {
 
 	// clock tick (track position + wall ms). A position jump not explained
 	// by wall time means seek/replay — drop every lock and let the next DP
-	// run re-anchor from scratch (план item 5 handles the rest)
+	// run re-anchor from scratch. A PAUSE (position frozen while wall time
+	// advances) is not a seek: the mapping stays valid and the lock must
+	// survive until playback resumes (план item 5)
 	onClock(position: number, wallMs: number): void {
-		if (
-			this.lastPos >= 0 &&
-			Math.abs(position - this.lastPos - (wallMs - this.lastWall) / 1000) > SEEK_JUMP_S
-		) {
-			this.reset();
+		if (this.lastPos >= 0) {
+			const dPos = position - this.lastPos;
+			const dWall = (wallMs - this.lastWall) / 1000;
+			if (dPos < -SEEK_JUMP_S || dPos > dWall + SEEK_JUMP_S) this.reset();
 		}
 		this.lastPos = position;
 		this.lastWall = wallMs;
