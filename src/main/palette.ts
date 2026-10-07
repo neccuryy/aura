@@ -12,7 +12,7 @@ export interface Palette {
 export async function extractPalette(art: Buffer): Promise<Palette | null> {
 	try {
 		const small = await sharp(art).resize(64, 64, { fit: "cover" }).png().toBuffer();
-		const palette = await new Vibrant(small, { colorCount: 16, quality: 1 }).getPalette();
+		const palette = await Vibrant.from(small).getPalette();
 		if (!palette) return null;
 		return {
 			darkMuted: palette.DarkMuted?.hex,

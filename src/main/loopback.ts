@@ -38,6 +38,7 @@ let totalFrames = 0;  // timeline position since capture start
 let cpuStart: NodeJS.CpuUsage | null = null;
 let cpuStartTime = 0;
 let lastChunkWall = 0; // wall clock of the last delivered chunk — watchdog input
+let isStartingLoopback = false; // guard against duplicate startLoopback calls
 
 // Stage 2 track clock: SMTC position samples pair the capture timeline
 // with the track timeline so vocal segments can be mapped into track
@@ -338,7 +339,8 @@ function logSecond(channels: number) {
 // samples, segments, VAD state) survives so evidence collected before the
 // capture death stays valid; only the dead device handle is replaced
 export function startLoopback(preserveTimeline = false, adoptVad?: VadSegmenter): void {
-	if (instance) return;
+	if (instance || isStartingLoopback) return;
+	isStartingLoopback = true;
 	try {
 		const addon: LoopbackAddon = require(path.join(
 			__dirname, "..", "..", "native", "loopback", "build", "Release", "aura_loopback.node"
@@ -346,6 +348,7 @@ export function startLoopback(preserveTimeline = false, adoptVad?: VadSegmenter)
 		instance = new addon.Loopback();
 	} catch (e) {
 		console.log(`[loopback] addon unavailable: ${e instanceof Error ? e.message : e}`);
+		isStartingLoopback = false;
 		return;
 	}
 
@@ -374,12 +377,19 @@ export function startLoopback(preserveTimeline = false, adoptVad?: VadSegmenter)
 	cpuStartTime = process.uptime();
 
 	instance.start((arg) => {
+		isStartingLoopback = false; // allow restart after a failure
 		if (arg instanceof Error) {
 			console.log(`[loopback] capture error: ${arg.message}`);
 			return;
 		}
 		lastChunkWall = Date.now();
 		const chunk = arg;
+		
+		// Validate chunk data size is valid for Float32 parsing
+		if (chunk.data.byteLength % 4 !== 0) {
+			console.error(`[loopback] Invalid chunk size: ${chunk.data.byteLength} bytes (not divisible by 4)`);
+			return;
+		}
 		// pipeline is rebuilt whenever the sample rate changes (device
 		// switch after a capture death) — totalFrames is rescaled so
 		// captureTime() stays continuous across the restart
@@ -433,6 +443,7 @@ export function startLoopback(preserveTimeline = false, adoptVad?: VadSegmenter)
 		if (sampleCount >= chunk.sampleRate) logSecond(chunk.channels);
 	});
 
+	isStartingLoopback = false; // allow watchdog restart after successful start
 	console.log("[loopback] started (device-wide loopback, mid+bandpass+VAD)");
 }
 
@@ -440,6 +451,7 @@ export function stopLoopback(): void {
 	if (!instance) return;
 	instance.stop();
 	instance = null;
+	isStartingLoopback = false; // allow future restarts
 	if (pipeline) {
 		const seg = pipeline.flush();
 		if (seg) {
@@ -508,6 +520,7 @@ export function restartLoopback(): void {
 	const vad = pipeline ? pipeline.vad : undefined;
 	pipeline = null;
 	pruneFrozenSamples();
+	isStartingLoopback = true; // prevent duplicate startLoopback calls
 	startLoopback(true, vad);
 }
 
