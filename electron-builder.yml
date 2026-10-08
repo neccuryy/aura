@@ -15,6 +15,8 @@ files:
   - "!patches/**"
   - "!план.txt"
   - "!test-title-match.js"
+  - "!benchmark.js"
+  - "!.benchmark/**"
   - "!assets/make-icon.ps1"
   - "!.qwen/**"
   - "!.qwen-*"

@@ -16,3 +16,4 @@ Thumbs.db
 .qwen/
 .qwen-*
 план.txt
+.benchmark/

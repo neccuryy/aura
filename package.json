@@ -1,7 +1,7 @@
 {
 	"name": "aura",
 	"description": "Karaoke lyrics companion for any Windows player",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"author": "neccuryy",
 	"main": "dist/main/index.js",
 	"license": "MIT",
