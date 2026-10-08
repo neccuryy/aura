@@ -8,6 +8,15 @@ directories:
   output: targets
 files:
   - "**/*"
+  # runtime needs dist/main (compiled) + src/renderer (loaded directly);
+  # TS sources, native dev addon, patches and docs are build-time only
+  - "!src/main/**"
+  - "!native/**"
+  - "!patches/**"
+  - "!план.txt"
+  - "!test-title-match.js"
+  - "!assets/make-icon.ps1"
+  - "!.qwen/**"
   - "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}"
   - "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}"
   - "!**/node_modules/.bin"

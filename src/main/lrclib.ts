@@ -31,12 +31,26 @@ export interface OnlineLyrics {
 const REQUEST_TIMEOUT = 8000;
 const USER_AGENT = "aura/0.1.0 (https://github.com/aura-app)";
 
-function fetchJson(url: string): Promise<{ status: number; data: unknown } | null> {
+function fetchJson(url: string, redirects = 0): Promise<{ status: number; data: unknown } | null> {
 	return new Promise((resolve) => {
+		// Node's https.get does not follow redirects itself — a 3xx would
+		// fall through to outcome() as a plain "miss" and poison the
+		// negative cache if the API ever starts redirecting
+		if (redirects > 5) return resolve(null);
 		const req = https.get(url, {
 			timeout: REQUEST_TIMEOUT,
 			headers: { "User-Agent": USER_AGENT },
 		}, (res) => {
+			if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400) {
+				const loc = res.headers.location;
+				res.resume(); // drain the body so the socket is freed
+				if (loc) {
+					resolve(fetchJson(new URL(loc, url).toString(), redirects + 1));
+				} else {
+					resolve(null);
+				}
+				return;
+			}
 			let body = "";
 			res.setEncoding("utf8");
 			res.on("data", (chunk) => body += chunk);
@@ -206,27 +220,33 @@ export function clearLyricsCache(artist: string | undefined, title: string): voi
 
 // settings panel: size of the whole lyrics cache (verdicts + misses)
 export function lyricsCacheStats(): { files: number; bytes: number } {
+	let files = 0;
+	let bytes = 0;
 	try {
-		let files = 0;
-		let bytes = 0;
 		for (const name of fs.readdirSync(cacheDir())) {
-			const st = fs.statSync(path.join(cacheDir(), name));
-			if (st.isFile()) {
-				files++;
-				bytes += st.size;
+			try {
+				const st = fs.statSync(path.join(cacheDir(), name));
+				if (st.isFile()) {
+					files++;
+					bytes += st.size;
+				}
+			} catch (_e) {
+				// one unreadable entry must not zero out the whole count
 			}
 		}
-		return { files, bytes };
-	} catch (_e) {
-		return { files: 0, bytes: 0 };
-	}
+	} catch (_e) {}
+	return { files, bytes };
 }
 
 // settings panel: wipe the whole lyrics cache
 export function clearAllLyricsCache(): void {
 	try {
 		for (const name of fs.readdirSync(cacheDir())) {
-			fs.unlinkSync(path.join(cacheDir(), name));
+			try {
+				fs.unlinkSync(path.join(cacheDir(), name));
+			} catch (_e) {
+				// one stubborn entry (locked, permissions) must not abort the wipe
+			}
 		}
 	} catch (_e) {}
 }

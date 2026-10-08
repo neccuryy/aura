@@ -17,7 +17,18 @@ export interface LibraryIndex {
 
 const AUDIO_EXTS = [".mp3", ".flac", ".m4a", ".ogg", ".oga", ".wav", ".opus", ".wma"];
 
-function walk(dir: string, out: string[]): void {
+function walk(dir: string, out: string[], seen: Set<string>): void {
+	let real: string;
+	try {
+		real = fs.realpathSync(dir);
+	} catch (_e) {
+		return;
+	}
+	// NTFS junctions read as directories and can loop (a junction pointing
+	// at an ancestor would recurse forever) — realpath collapses them, so
+	// every real directory is visited at most once
+	if (seen.has(real)) return;
+	seen.add(real);
 	let entries: fs.Dirent[];
 	try {
 		entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -27,7 +38,7 @@ function walk(dir: string, out: string[]): void {
 	for (const e of entries) {
 		if (e.name.startsWith(".")) continue;
 		const full = path.join(dir, e.name);
-		if (e.isDirectory()) walk(full, out);
+		if (e.isDirectory()) walk(full, out, seen);
 		else if (AUDIO_EXTS.includes(path.extname(e.name).toLowerCase())) out.push(full);
 	}
 }
@@ -43,7 +54,8 @@ export function normalizeName(s: string): string {
 
 export async function buildIndex(folders: string[]): Promise<LibraryIndex> {
 	const files: string[] = [];
-	for (const f of folders) walk(f, files);
+	const seen = new Set<string>();
+	for (const f of folders) walk(f, files, seen);
 
 	const tracks: TrackEntry[] = [];
 	for (const file of files) {

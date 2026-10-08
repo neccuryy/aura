@@ -376,7 +376,7 @@ export function startLoopback(preserveTimeline = false, adoptVad?: VadSegmenter)
 	cpuStart = process.cpuUsage();
 	cpuStartTime = process.uptime();
 
-	instance.start((arg) => {
+	const onChunk = (arg: Error | LoopbackChunk): void => {
 		isStartingLoopback = false; // allow restart after a failure
 		if (arg instanceof Error) {
 			console.log(`[loopback] capture error: ${arg.message}`);
@@ -441,7 +441,18 @@ export function startLoopback(preserveTimeline = false, adoptVad?: VadSegmenter)
 
 		// one log line per second of audio
 		if (sampleCount >= chunk.sampleRate) logSecond(chunk.channels);
-	});
+	};
+
+	// a synchronous throw from the native start() would leave
+	// isStartingLoopback stuck true — no restart could ever run again
+	try {
+		instance.start(onChunk);
+	} catch (e) {
+		console.log(`[loopback] capture failed to start: ${e instanceof Error ? e.message : e}`);
+		instance = null;
+		isStartingLoopback = false;
+		return;
+	}
 
 	isStartingLoopback = false; // allow watchdog restart after successful start
 	console.log("[loopback] started (device-wide loopback, mid+bandpass+VAD)");
@@ -520,7 +531,6 @@ export function restartLoopback(): void {
 	const vad = pipeline ? pipeline.vad : undefined;
 	pipeline = null;
 	pruneFrozenSamples();
-	isStartingLoopback = true; // prevent duplicate startLoopback calls
 	startLoopback(true, vad);
 }
 

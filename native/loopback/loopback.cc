@@ -48,12 +48,22 @@ public:
 	explicit Loopback(const Napi::CallbackInfo& info)
 		: Napi::ObjectWrap<Loopback>(info) {}
 
-	~Loopback() override {
-		running.store(false);
-		if (thread.joinable()) thread.join();
-	}
+	~Loopback() override { Shutdown(); }
 
 private:
+	// stop the capture thread and drop the TSFN; without the Release the
+	// TSFN keeps the Node event loop alive forever. The destructor must do
+	// this too — GC can kill the wrapper without stop() ever being called
+	void Shutdown() {
+		running.store(false);
+		if (thread.joinable()) thread.join();
+		if (tsfn) {
+			tsfn->Release();
+			delete tsfn;
+			tsfn = nullptr;
+		}
+	}
+
 	Napi::Value Start(const Napi::CallbackInfo& info) {
 		Napi::Env env = info.Env();
 		if (running.load()) return env.Undefined();
@@ -70,16 +80,8 @@ private:
 	}
 
 	Napi::Value Stop(const Napi::CallbackInfo& info) {
-		Napi::Env env = info.Env();
-		running.store(false);
-		if (thread.joinable()) thread.join();
-		if (tsfn) {
-			// must Release or the TSFN keeps the Node event loop alive forever
-			tsfn->Release();
-			delete tsfn;
-			tsfn = nullptr;
-		}
-		return env.Undefined();
+		Shutdown();
+		return info.Env().Undefined();
 	}
 
 	void Emit(Chunk* chunk) {
@@ -103,7 +105,12 @@ private:
 			}
 			delete c;
 		};
-		tsfn->BlockingCall(chunk, callback);
+		// a failed call (env closing) never runs the callback — the chunk
+		// would leak; nothing can be delivered anymore, so stop capturing
+		if (tsfn->BlockingCall(chunk, callback) != napi_ok) {
+			delete chunk;
+			running.store(false);
+		}
 	}
 
 	void Fail(const std::string& message) {
@@ -115,6 +122,9 @@ private:
 
 	void CaptureLoop() {
 		HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+		// RPC_E_CHANGED_MODE: COM is already initialized on this thread in
+		// another mode — usable, but the refcount isn't ours to decrement
+		const bool comInitialized = SUCCEEDED(hr);
 		if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
 			Fail("CoInitializeEx failed: " + std::to_string(hr));
 			return;
@@ -132,7 +142,10 @@ private:
 			if (device) device->Release();
 			if (enumerator) enumerator->Release();
 			if (fmt) CoTaskMemFree(fmt);
-			CoUninitialize();
+			if (comInitialized) CoUninitialize();
+			// honest state if the loop died on its own (device loss) —
+			// otherwise a later start() on this instance would be a no-op
+			running.store(false);
 		};
 
 		hr = CoCreateInstance(
@@ -218,13 +231,16 @@ private:
 			// packet-based reads from the capture client; loopback delivers
 			// whatever the device rendered since the last drain
 			UINT32 packetFrames = 0;
-			while (SUCCEEDED(capture->GetNextPacketSize(&packetFrames)) &&
-				packetFrames > 0) {
+			HRESULT hrPacket = capture->GetNextPacketSize(&packetFrames);
+			while (SUCCEEDED(hrPacket) && packetFrames > 0) {
 				BYTE* data = nullptr;
 				UINT32 frames = 0;
 				DWORD flags = 0;
-				if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr)))
+				HRESULT hrBuf = capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
+				if (FAILED(hrBuf)) {
+					hrPacket = hrBuf;
 					break;
+				}
 
 				auto* chunk = new Chunk();
 				chunk->sampleRate = rate;
@@ -239,6 +255,15 @@ private:
 				}
 				capture->ReleaseBuffer(frames);
 				Emit(chunk);
+				hrPacket = capture->GetNextPacketSize(&packetFrames);
+			}
+			if (FAILED(hrPacket)) {
+				// the capture stream died under us (default-device switch,
+				// exclusive-mode takeover): a dead client fails forever, so
+				// polling it would stall the timeline silently — report once
+				// and exit; the JS watchdog replaces the instance
+				Fail("capture stream died: " + std::to_string(hrPacket));
+				break;
 			}
 		}
 

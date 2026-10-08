@@ -579,6 +579,11 @@ async function handleUpdate(update: Update | null): Promise<boolean> {
 	// suspect (the ±15s filter rejected everything) — re-run it once
 	if (update.metadata.length && update.metadata.length !== trackLength) {
 		trackLength = update.metadata.length;
+		// the renderer's seekbar learned the length only from the initial
+		// track payload — a stale one must be corrected on screen too
+		if (win && !win.isDestroyed()) {
+			win.webContents.send("track-length", { length: trackLength });
+		}
 		if (
 			lyricsLaunchedFor === id && !lyricsDurationFixed && lastTrackTitle &&
 			Math.abs(trackLength - lyricsLookupDuration) > 5 && !lyricsFromLrclib
@@ -638,11 +643,27 @@ async function handleUpdate(update: Update | null): Promise<boolean> {
 	return true;
 }
 
+// handleUpdate mutates module-level state (lastTrackId, job tokens, source
+// entries) and its awaits (extractPalette) open interleaving windows — the
+// 500ms poll tick, the watcher's session callback and rebuildIndex must
+// never run it in parallel. Every caller goes through this chain
+let updateChain: Promise<void> = Promise.resolve();
+function queueUpdate(update: Update | null): Promise<boolean> {
+	const run = updateChain.then(() => handleUpdate(update));
+	// the chain itself must never reject — a failed run may not poison the
+	// queue for every future update
+	updateChain = run.then(
+		() => undefined,
+		() => undefined
+	);
+	return run;
+}
+
 async function rebuildIndex(): Promise<void> {
 	index = await buildIndex(config.musicFolders);
 	// force re-matching of the currently playing track against the fresh index
 	lastTrackId = null;
-	if (watcher) await handleUpdate(await watcher.getUpdate());
+	if (watcher) await queueUpdate(await watcher.getUpdate());
 }
 
 function libraryStats() {
@@ -852,7 +873,7 @@ app.whenReady().then(async () => {
 	if (!app.isPackaged) startLoopback();
 
 	watcher = new MediaWatcher(async () => {
-		await handleUpdate(await watcher!.getUpdate());
+		await queueUpdate(await watcher!.getUpdate());
 	});
 
 	// single serialized poll loop: track/status changes + position ticks.
@@ -861,7 +882,7 @@ app.whenReady().then(async () => {
 		if (!watcher || !win || win.isDestroyed()) return;
 		try {
 			const update = await watcher.getUpdate();
-			const processed = await handleUpdate(update);
+			const processed = await queueUpdate(update);
 			// a frozen (ignored) session must not feed its positions into
 			// the track clock, the aligner, or the seekbar either
 			if (processed && update && lastTrackId !== null) {

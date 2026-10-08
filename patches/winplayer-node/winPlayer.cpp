@@ -83,8 +83,16 @@ void Player::addPlayerLocked(std::string const AUMID, GlobalSystemMediaTransport
 void Player::registerPlayerEvents(std::string const AUMID, GlobalSystemMediaTransportControlsSession const &player)
 {
 	// Playing, Stopped, etc
-	player.PlaybackInfoChanged(winrt::auto_revoke, [this](GlobalSystemMediaTransportControlsSession player, PlaybackInfoChangedEventArgs args)
+	// a playback-status change must re-pick the active session: with two
+	// live sessions (A playing, B paused) pausing A and starting B fires
+	// only this event — SessionsChanged never runs, and without the recalc
+	// the active player would stay on the paused one
+	player.PlaybackInfoChanged(winrt::auto_revoke, [this, AUMID](GlobalSystemMediaTransportControlsSession player, PlaybackInfoChangedEventArgs args)
 							   {
+		{
+			std::lock_guard<std::mutex> lock(this->stateMutex);
+			this->calculateActivePlayerLocked(AUMID);
+		}
 		if(this->callback.has_value()) (this->callback.value())(); })
 		.swap(this->playbackInfoChangedHandlers[AUMID]);
 
@@ -131,10 +139,13 @@ void Player::calculateActivePlayerLocked(std::optional<std::string> const prefer
 
 concurrency::task<std::optional<Metadata>> Player::getMetadata(GlobalSystemMediaTransportControlsSession player)
 {
-	auto timelineProperties = player.GetTimelineProperties();
 	try
 	{
 		auto info = co_await player.TryGetMediaPropertiesAsync();
+		// snapshot the timeline AFTER the metadata await: snapshotting before
+		// it returns the PREVIOUS track's timeline on a switch — the new
+		// track's metadata arrives paired with the old track's length
+		auto timelineProperties = player.GetTimelineProperties();
 		Metadata metadata;
 
 		metadata.title = winrt::to_string(info.Title());

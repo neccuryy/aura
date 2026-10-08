@@ -26,6 +26,9 @@ const api = {
 	onStatus: (cb: (data: unknown) => void): void => {
 		ipcRenderer.on("status", (_e, data) => cb(data));
 	},
+	onTrackLength: (cb: (data: unknown) => void): void => {
+		ipcRenderer.on("track-length", (_e, data) => cb(data));
+	},
 	onPosition: (cb: (data: unknown) => void): void => {
 		ipcRenderer.on("position", (_e, data) => cb(data));
 	},
@@ -59,6 +62,9 @@ const api = {
 	},
 	onUpdateInstalling: (cb: () => void): void => {
 		ipcRenderer.on("update-installing", (_e) => cb());
+	},
+	onUpdateError: (cb: () => void): void => {
+		ipcRenderer.on("update-error", (_e) => cb());
 	},
 	downloadUpdate: (): void => ipcRenderer.send("update:download")
 };

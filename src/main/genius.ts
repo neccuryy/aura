@@ -26,9 +26,10 @@ export interface GeniusOutcome {
 	definitive: boolean;
 }
 
-// Genius under load answers 200s very slowly (observed ~22s) — a tight
-// timeout discards those slow-but-valid responses as transient failures
-const REQUEST_TIMEOUT = 20000;
+// Genius under load answers 200s very slowly (observed ~22s) — a timeout
+// below that discards slow-but-valid responses as transient failures and
+// the lookup "works every other time"; 30s lets them land
+const REQUEST_TIMEOUT = 30000;
 const BROWSER_UA =
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 
@@ -197,7 +198,11 @@ export async function getGeniusLyrics(
 		if (page.status !== 200) return { result: null, definitive: false };
 
 		const lyricsHtml = extractLyricsHtml(page.body);
-		if (!lyricsHtml) return { result: null, definitive: true };
+		// a 200 page without the expected __PRELOADED_STATE__ structure is a
+		// layout change / anomaly, not proof the song has no lyrics — a
+		// definitive "no" here would negative-cache every track on the day
+		// Genius ships a redesign
+		if (!lyricsHtml) return { result: null, definitive: false };
 
 		const lines = htmlToLines(lyricsHtml);
 		if (lines.length === 0) return { result: null, definitive: true };

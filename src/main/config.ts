@@ -65,6 +65,11 @@ export function loadConfig(): AuraConfig {
 }
 
 export function saveConfig(config: AuraConfig): void {
-	fs.mkdirSync(path.dirname(configPath()), { recursive: true });
-	fs.writeFileSync(configPath(), JSON.stringify(config, null, "\t"));
+	const file = configPath();
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	// write via a temp file + rename: a crash mid-write must not corrupt
+	// config.json (it holds the Genius token) — rename is atomic on NTFS
+	const tmp = `${file}.tmp`;
+	fs.writeFileSync(tmp, JSON.stringify(config, null, "\t"));
+	fs.renameSync(tmp, file);
 }

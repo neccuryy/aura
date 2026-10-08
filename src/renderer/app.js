@@ -155,9 +155,8 @@ function showLyricsLoading() {
 }
 
 function renderLyrics(lyrics, libraryEmpty) {
-	const inner = resetLyricsPane();
-
 	if (!lyrics) {
+		const inner = resetLyricsPane();
 		const div = document.createElement("div");
 		div.className = "line placeholder";
 		if (libraryEmpty) {
@@ -170,6 +169,7 @@ function renderLyrics(lyrics, libraryEmpty) {
 	}
 
 	if (lyrics.instrumental) {
+		const inner = resetLyricsPane();
 		const div = document.createElement("div");
 		div.className = "line placeholder instrumental";
 		div.textContent = "Инструментал";
@@ -177,16 +177,40 @@ function renderLyrics(lyrics, libraryEmpty) {
 		return;
 	}
 
+	// live alignment ("aura") re-delivers the same text with refined times
+	// every few seconds — a full rebuild resets the scroll to the top and
+	// teleports the view ("start → active line" on every tick). When the
+	// text is unchanged, update in place: keep the DOM and the scroll
+	// position, only the times (and thus the highlight) move
+	if (
+		state.linesEl && state.lines.length > 0 &&
+		state.lines.length === lyrics.lines.length &&
+		state.lines.every((l, i) => (l.text || "♪") === (lyrics.lines[i].text || "♪"))
+	) {
+		state.lines = lyrics.lines;
+		state.synchronized = lyrics.synchronized;
+		const children = state.linesEl.children;
+		for (let i = 0; i < children.length; i++) {
+			children[i].classList.toggle("clickable", state.synchronized && state.lines[i].time >= 0);
+		}
+		return;
+	}
+
+	const inner = resetLyricsPane();
 	state.lines = lyrics.lines;
 	state.synchronized = lyrics.synchronized;
 
-	for (const line of state.lines) {
+	for (let i = 0; i < state.lines.length; i++) {
+		const line = state.lines[i];
 		const div = document.createElement("div");
 		div.className = "line";
 		div.textContent = line.text || "♪";
 		if (state.synchronized && line.time >= 0) {
 			div.classList.add("clickable");
-			div.addEventListener("click", () => seekTo(line.time));
+			// read the time at click time: live alignment refreshes the
+			// times in place, and a closure over `line` would seek to a
+			// stale time
+			div.addEventListener("click", () => seekTo(state.lines[i].time));
 		}
 		inner.appendChild(div);
 	}
@@ -357,6 +381,17 @@ api.onTrack((data) => {
 		showLyricsLoading();
 	}
 	refreshLyricsButtons();
+});
+
+// the first update after a track switch can carry the previous track's
+// length — the corrected value arrives later and must reach the seekbar
+// and the total-time label
+api.onTrackLength((data) => {
+	const len = data && typeof data.length === "number" ? data.length : 0;
+	if (len > 0 && len !== state.length) {
+		state.length = len;
+		el.timeTotal.textContent = fmtTime(len);
+	}
 });
 
 // online lyrics arrive after the track payload (background lookup):
@@ -636,6 +671,17 @@ api.onUpdateProgress((data) => {
 api.onUpdateInstalling(() => {
 	el.btnUpdate.textContent = "…";
 	el.btnUpdate.title = "Устанавливается — приложение перезапустится";
+});
+
+// a failed download must not leave the button stuck at "NN%" — restore
+// the icon (setting textContent detached it) so the user can retry
+api.onUpdateError(() => {
+	if (!el.btnUpdate.classList.contains("downloading")) return;
+	el.btnUpdate.classList.remove("downloading");
+	el.btnUpdate.textContent = "";
+	el.btnUpdate.appendChild(el.updateIcon);
+	el.updateIcon.classList.remove("hidden");
+	el.btnUpdate.title = "Не удалось скачать — попробовать ещё раз";
 });
 
 /* ---------- lyrics source badge ---------- */

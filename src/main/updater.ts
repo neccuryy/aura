@@ -21,7 +21,12 @@ export function initUpdater(getWin: () => BrowserWindow | null): void {
 		send("update-available", { version: info.version });
 	});
 	autoUpdater.on("update-not-available", () => console.log("[updater] up to date"));
-	autoUpdater.on("error", (err) => console.log(`[updater] error: ${err && err.message ? err.message : err}`));
+	// the renderer resets its download button — without this a failed
+	// download leaves it stuck at "NN%" forever
+	autoUpdater.on("error", (err) => {
+		console.log(`[updater] error: ${err && err.message ? err.message : err}`);
+		send("update-error");
+	});
 
 	autoUpdater.on("download-progress", (progress) => {
 		send("update-progress", { percent: Math.round(progress.percent) });
@@ -38,7 +43,7 @@ export function initUpdater(getWin: () => BrowserWindow | null): void {
 		console.log("[updater] download requested");
 		void autoUpdater.downloadUpdate().catch((err) => {
 			console.log(`[updater] download failed: ${err && err.message ? err.message : err}`);
-			send("update-available", { version: autoUpdater.currentVersion.version }); // re-show the button
+			send("update-error"); // the renderer restores the retry button
 		});
 	});
 
