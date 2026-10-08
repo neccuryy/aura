@@ -871,9 +871,12 @@ function registerIpc(): void {
 	});
 }
 
-// system security software (AV/VPN injectors) can crash Chromium sandboxed
-// child processes on this machine — the app is local-only, so run without them
-app.disableHardwareAcceleration();
+// hardware acceleration is ON again (2026-10-08): with it disabled, the
+// WebGL fluid background + full-window CSS blur rendered on the CPU and
+// the UI dropped to ~2fps in fullscreen. The original disable was a
+// workaround for AV/VPN injector crashes on one machine — if those
+// return, crash dumps land in userData/crashes; no-sandbox stays for now
+// (it was the bigger crash factor)
 app.commandLine.appendSwitch("no-sandbox");
 
 // the process sporadically dies with a native segfault (winplayer-node /
