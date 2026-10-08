@@ -57,6 +57,12 @@ const el = {
 	indexStats: document.getElementById("index-stats"),
 	cacheStats: document.getElementById("cache-stats"),
 	btnClearCache: document.getElementById("btn-clear-cache"),
+	geniusToken: document.getElementById("genius-token"),
+	btnToggleToken: document.getElementById("btn-toggle-token"),
+	iconEye: document.getElementById("icon-eye"),
+	iconEyeOff: document.getElementById("icon-eye-off"),
+	btnSaveToken: document.getElementById("btn-save-token"),
+	tokenStatus: document.getElementById("token-status"),
 	ignoreList: document.getElementById("ignore-list")
 };
 
@@ -550,7 +556,13 @@ el.btnSettings.addEventListener("click", async () => {
 	renderSettings(await api.getConfig());
 	renderCacheStats(await api.cacheStats());
 	renderIgnoreList(await api.listApps());
+	const t = await api.getToken();
+	el.geniusToken.value = t.token;
+	el.tokenStatus.textContent = t.token ? "Токен сохранён — Genius включён." : "";
 	el.settings.classList.remove("hidden");
+	// the modal covers the whole window — freeze the fluid background so
+	// its software-rendered blur doesn't starve the modal's own animations
+	if (window.FluidBg) window.FluidBg.pause();
 });
 
 el.btnAddFolder.addEventListener("click", async () => {
@@ -571,8 +583,66 @@ el.btnClearCache.addEventListener("click", async () => {
 	}
 });
 
+el.btnSaveToken.addEventListener("click", async () => {
+	const res = await api.setToken(el.geniusToken.value);
+	el.geniusToken.value = res.token;
+	el.tokenStatus.textContent = res.token
+		? "Сохранено — Genius включён."
+		: "Токен убран — Genius выключен.";
+	// the token just appeared — if the current track found nothing without
+	// it, re-run the search now that Genius is available
+	if (res.token && state.hasTrack && !state.lines.length) {
+		el.srcName.textContent = "";
+		showLyricsLoading();
+		api.retryLyrics();
+	}
+});
+
+// the token field is masked by default; the eye toggles plain text
+el.btnToggleToken.addEventListener("click", () => {
+	const show = el.geniusToken.type === "password";
+	el.geniusToken.type = show ? "text" : "password";
+	el.iconEye.classList.toggle("hidden", show);
+	el.iconEyeOff.classList.toggle("hidden", !show);
+	el.btnToggleToken.title = show ? "Скрыть токен" : "Показать токен";
+});
+
+/* ---------- collapsible settings sections ---------- */
+
+// measured max-height accordion: pin the real height before collapsing so
+// the animation runs from the actual size, and clear it after opening so
+// the content can grow (folder list) without clipping
+function setSectionCollapsed(section, collapsed) {
+	const body = section.querySelector(".section-body");
+	if (collapsed) {
+		body.style.maxHeight = body.scrollHeight + "px";
+		void body.offsetHeight; // commit the pinned height before animating to 0
+		body.style.maxHeight = "0px";
+	} else {
+		body.style.maxHeight = body.scrollHeight + "px";
+		body.addEventListener("transitionend", function onEnd(e) {
+			body.removeEventListener("transitionend", onEnd);
+			// fully open — let the content grow freely from here
+			if (e.propertyName === "max-height" && body.style.maxHeight !== "0px") {
+				body.style.maxHeight = "";
+			}
+		});
+	}
+	section.classList.toggle("collapsed", collapsed);
+}
+
+for (const head of document.querySelectorAll(".section-head")) {
+	head.addEventListener("click", () => {
+		const section = head.closest(".settings-section");
+		setSectionCollapsed(section, !section.classList.contains("collapsed"));
+	});
+}
+
 el.settings.addEventListener("click", (e) => {
-	if (e.target === el.settings) el.settings.classList.add("hidden");
+	if (e.target === el.settings) {
+		el.settings.classList.add("hidden");
+		if (window.FluidBg) window.FluidBg.resume();
+	}
 });
 
 /* ---------- side buttons ---------- */

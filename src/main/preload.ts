@@ -13,6 +13,9 @@ const api = {
 		ipcRenderer.invoke("cache:stats"),
 	clearCache: (): Promise<{ files: number; bytes: number }> =>
 		ipcRenderer.invoke("cache:clear"),
+	getToken: (): Promise<{ token: string }> => ipcRenderer.invoke("token:get"),
+	setToken: (token: string): Promise<{ token: string }> =>
+		ipcRenderer.invoke("token:set", token),
 	listApps: (): Promise<{ apps: { app: string; appName: string; ignored: boolean }[] }> =>
 		ipcRenderer.invoke("apps:list"),
 	toggleAppIgnore: (app: string): Promise<{ apps: { app: string; appName: string; ignored: boolean }[] }> =>

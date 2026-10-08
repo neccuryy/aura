@@ -508,12 +508,14 @@ body.fullscreen #win-controls { display: none; }
 .modal {
 	position: fixed;
 	inset: 0;
-	background: rgba(0, 0, 0, 0.55);
+	/* no backdrop-filter: with hardware acceleration off it re-blurs the
+	   whole window on the CPU every frame — the dim alone reads fine over
+	   the already-blurred background */
+	background: rgba(0, 0, 0, 0.62);
 	display: flex;
 	align-items: center;
 	justify-content: center;
 	z-index: 10;
-	backdrop-filter: blur(4px);
 }
 
 .modal-card {
@@ -640,6 +642,73 @@ body.fullscreen #win-controls { display: none; }
 
 .modal-actions button.primary:hover { filter: brightness(1.1); background: var(--accent); }
 
+/* Genius token */
+.token-row {
+	justify-content: flex-start;
+}
+
+.token-field {
+	position: relative;
+	flex: 1;
+	min-width: 0;
+}
+
+.token-field input {
+	width: 100%;
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	background: rgba(255, 255, 255, 0.05);
+	color: var(--text);
+	border-radius: 10px;
+	padding: 9px 40px 9px 12px;
+	font-size: 13px;
+	font-family: inherit;
+}
+
+.token-field input:focus {
+	outline: none;
+	border-color: var(--accent);
+}
+
+.token-field button {
+	position: absolute;
+	right: 5px;
+	top: 50%;
+	transform: translateY(-50%);
+	border: none;
+	background: transparent;
+	color: var(--text-dim);
+	cursor: pointer;
+	padding: 4px;
+	border-radius: 6px;
+	display: flex;
+}
+
+.token-field button:hover { color: var(--text); background: rgba(255, 255, 255, 0.08); }
+
+.token-field button svg {
+	width: 18px;
+	height: 18px;
+}
+
+.hint.steps {
+	padding-left: 20px;
+	margin-bottom: 14px;
+}
+
+.hint.steps li {
+	margin-bottom: 4px;
+}
+
+.hint a {
+	color: var(--accent);
+}
+
+#token-status {
+	margin-top: 10px;
+	margin-bottom: 0;
+	min-height: 18px;
+}
+
 #index-stats {
 	margin-top: 14px;
 	font-size: 12px;
@@ -655,6 +724,42 @@ body.fullscreen #win-controls { display: none; }
 .settings-section h3 {
 	font-size: 14px;
 	margin-bottom: 10px;
+}
+
+/* collapsible sections: the head is the toggle, the body animates via a
+   JS-measured max-height (0 while collapsed) */
+.section-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	cursor: pointer;
+	user-select: none;
+	padding: 2px 0;
+	border-radius: 6px;
+	transition: color 0.15s ease;
+}
+
+.section-head:hover { color: var(--accent); }
+
+.section-head .chevron {
+	width: 20px;
+	height: 20px;
+	flex-shrink: 0;
+	color: var(--text-dim);
+	transition: transform 0.2s ease;
+}
+
+.settings-section.collapsed .section-head .chevron {
+	transform: rotate(-90deg);
+}
+
+.section-body {
+	overflow: hidden;
+	transition: max-height 0.25s ease;
+}
+
+.settings-section.collapsed .section-body {
+	max-height: 0;
 }
 
 .settings-section .modal-actions {

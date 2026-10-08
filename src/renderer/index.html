@@ -87,28 +87,58 @@
 		<div class="modal-card">
 			<div class="modal-scroll">
 			<h2>Настройки</h2>
-			<section class="settings-section">
-				<h3>Папки с музыкой</h3>
-				<p class="hint">Укажи папки, где лежат mp3 и файлы .lrc с текстами. Текст подхватывается автоматически, если .lrc называется так же, как mp3.</p>
-				<ul id="folder-list"></ul>
-				<div class="modal-actions">
-					<button id="btn-add-folder" class="primary">Добавить папку</button>
-					<button id="btn-reindex">Переиндексировать</button>
-				</div>
-				<div id="index-stats"></div>
-			</section>
-			<section class="settings-section">
-				<h3>Кеш текстов</h3>
-				<div class="modal-actions">
-					<span id="cache-stats"></span>
-					<button id="btn-clear-cache" title="Кеш хранит найденные тексты и тайминги aura, чтобы повторы не искать заново. Очистка стирает весь кеш; текст текущего трека начнёт искаться с нуля.">Очистить</button>
+			<section class="settings-section collapsed">
+				<h3 class="section-head"><span>Папки с музыкой</span><svg class="chevron" viewBox="0 0 24 24"><path fill="currentColor" d="M16.59 8.59 12 13.17 7.41 8.59 6 10l6 6 6-6z"/></svg></h3>
+				<div class="section-body">
+					<p class="hint">Укажи папки, где лежат mp3 и файлы .lrc с текстами. Текст подхватывается автоматически, если .lrc называется так же, как mp3.</p>
+					<ul id="folder-list"></ul>
+					<div class="modal-actions">
+						<button id="btn-add-folder" class="primary">Добавить папку</button>
+						<button id="btn-reindex">Переиндексировать</button>
+					</div>
+					<div id="index-stats"></div>
 				</div>
 			</section>
-			<section class="settings-section">
-				<h3>Игнорировать</h3>
-				<p class="hint">Приложения, которые aura не должна считать источником музыки — например, мессенджеры с голосовыми. Список наполняется сам: здесь появляются все источники, которые aura видела.</p>
-				<div id="ignore-box">
-					<ul id="ignore-list"></ul>
+			<section class="settings-section collapsed">
+				<h3 class="section-head"><span>Кеш текстов</span><svg class="chevron" viewBox="0 0 24 24"><path fill="currentColor" d="M16.59 8.59 12 13.17 7.41 8.59 6 10l6 6 6-6z"/></svg></h3>
+				<div class="section-body">
+					<div class="modal-actions">
+						<span id="cache-stats"></span>
+						<button id="btn-clear-cache" title="Кеш хранит найденные тексты и тайминги aura, чтобы повторы не искать заново. Очистка стирает весь кеш; текст текущего трека начнёт искаться с нуля.">Очистить</button>
+					</div>
+				</div>
+			</section>
+			<section class="settings-section collapsed">
+				<h3 class="section-head"><span>Genius токен</span><svg class="chevron" viewBox="0 0 24 24"><path fill="currentColor" d="M16.59 8.59 12 13.17 7.41 8.59 6 10l6 6 6-6z"/></svg></h3>
+				<div class="section-body">
+					<p class="hint">Genius — запасной источник текстов, когда Lrclib ничего не нашёл. Без токена работают только Lrclib и локальные .lrc. Токен бесплатный и персональный, делается за минуту:</p>
+					<ol class="hint steps">
+						<li>Открой <a href="https://genius.com/api-clients" target="_blank" rel="noreferrer">genius.com/api-clients</a> и войди в аккаунт Genius (регистрация бесплатная).</li>
+						<li>Заполни форму «New API Client»: App Name — любое (например, «aura»); Icon URL не трогай — он уже заполнен; в App Website URL и Redirect URI впиши <code>http://localhost</code>.</li>
+						<li>Нажми «Save» — появится твой API-клиент.</li>
+						<li>На его странице нажми «Generate Access Token» и скопируй появившийся токен.</li>
+						<li>Вставь токен в поле ниже и нажми «Сохранить».</li>
+					</ol>
+					<div class="modal-actions token-row">
+						<div class="token-field">
+							<input id="genius-token" type="password" placeholder="Токен Genius" autocomplete="off" spellcheck="false">
+							<button id="btn-toggle-token" title="Показать токен">
+								<svg id="icon-eye" viewBox="0 0 24 24"><path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+								<svg id="icon-eye-off" viewBox="0 0 24 24" class="hidden"><path fill="currentColor" d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2z"/></svg>
+							</button>
+						</div>
+						<button id="btn-save-token" class="primary">Сохранить</button>
+					</div>
+					<div id="token-status" class="hint"></div>
+				</div>
+			</section>
+			<section class="settings-section collapsed">
+				<h3 class="section-head"><span>Игнорировать</span><svg class="chevron" viewBox="0 0 24 24"><path fill="currentColor" d="M16.59 8.59 12 13.17 7.41 8.59 6 10l6 6 6-6z"/></svg></h3>
+				<div class="section-body">
+					<p class="hint">Приложения, которые aura не должна считать источником музыки — например, мессенджеры с голосовыми. Список наполняется сам: здесь появляются все источники, которые aura видела.</p>
+					<div id="ignore-box">
+						<ul id="ignore-list"></ul>
+					</div>
 				</div>
 			</section>
 			</div>

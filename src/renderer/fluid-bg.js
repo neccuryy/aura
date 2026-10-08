@@ -166,16 +166,33 @@ void main(){
 	window.addEventListener("resize", resize);
 	resize();
 
+	// paused = the rAF loop stops entirely: with hardware acceleration
+	// disabled, the full-window canvas + CSS blur is pure CPU work every
+	// frame, and it starves everything else (the settings modal's
+	// animations drop to a slideshow). The modal covers the screen anyway —
+	// freezing the background is invisible
+	let running = true;
+
 	window.FluidBg = {
 		setColors(base, accentA, accentB) {
 			target[0] = hexToRgb01(base);
 			target[1] = hexToRgb01(accentA);
 			target[2] = hexToRgb01(accentB);
 		},
+		pause() {
+			running = false;
+		},
+		resume() {
+			if (running) return;
+			running = true;
+			last = performance.now();
+			requestAnimationFrame(frame);
+		},
 	};
 
 	let last = performance.now();
 	function frame(now) {
+		if (!running) return;
 		const dt = Math.min(100, now - last);
 		last = now;
 

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, crashReporter } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, crashReporter, shell } from "electron";
 import * as fs from "fs";
 import * as path from "path";
 import type { Update, Capabilities } from "winplayer-node";
@@ -691,6 +691,13 @@ function createWindow(): void {
 		}
 	});
 	win.loadFile(path.join(app.getAppPath(), "src", "renderer", "index.html"));
+	// external links (the Genius API page in settings) must open in the
+	// system browser — without this target="_blank" would navigate the app
+	// window itself to the site
+	win.webContents.setWindowOpenHandler(({ url }) => {
+		void shell.openExternal(url);
+		return { action: "deny" };
+	});
 	win.on("closed", () => {
 		win = null;
 	});
@@ -743,6 +750,17 @@ function registerIpc(): void {
 	});
 
 	ipcMain.handle("cache:stats", () => lyricsCacheStats());
+
+	// Genius access token: personal, lives only in the user's config.json —
+	// never in sources or builds. Empty value removes it (Genius off)
+	ipcMain.handle("token:get", () => ({ token: config.geniusToken || "" }));
+	ipcMain.handle("token:set", (_e, token: unknown) => {
+		const t = typeof token === "string" ? token.trim() : "";
+		if (t) config.geniusToken = t;
+		else delete config.geniusToken;
+		saveConfig(config);
+		return { token: config.geniusToken || "" };
+	});
 
 	// settings' "Игнорировать" section: every app seen holding the current
 	// SMTC session, newest first, with its ignore state
