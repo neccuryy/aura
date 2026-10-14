@@ -5,7 +5,7 @@
 // turns segments into synced lyrics.
 
 import * as path from "path";
-import { VocalPipeline, VadSegmenter, VocalSegment } from "./dsp";
+import { VocalPipeline, VadSegmenter, VadPoint, VocalSegment, SUBFRAME_SEC } from "./dsp";
 
 interface LoopbackChunk {
 	sampleRate: number;
@@ -73,6 +73,10 @@ let trackSegments: VocalSegment[] = []; // closed segments of the current track
 let trackStartT = 0; // capture time when the current track began
 let lastPairClass: PairClass | null = null;
 let evidenceCutCap = -Infinity; // capture time of the last seek — chunks older than it are stragglers
+// Sprint F: capture times where the live VAD was cut (seek splitAt,
+// watchdog flush) — a point-switch replay must re-apply them so no
+// replayed segment spans a jump or a capture-death gap
+let vadCuts: number[] = [];
 // vocal energy envelope (effective vocal RMS per chunk) in capture time —
 // feeds intra-block segment refinement in the aligner
 let energySamples: { t: number; e: number }[] = [];
@@ -95,6 +99,7 @@ export function beginTrack(): void {
 	trackStartT = captureTime();
 	lastPairClass = null;
 	evidenceCutCap = -Infinity;
+	vadCuts = [];
 }
 
 function classifyPair(prev: TrackSample, captureT: number, trackT: number): PairClass {
@@ -183,6 +188,7 @@ function rebuildClock(): void {
 // new_track_pos")
 function handleSeek(prev: TrackSample, captureT: number, trackT: number, backward: boolean): void {
 	if (pipeline) {
+		vadCuts.push(captureT); // the point-switch replay must re-cut here
 		for (const seg of pipeline.splitAt(captureT)) {
 			console.log(`[vad] segment ${fmtSegment(seg)} (seek cut)`);
 			trackSegments.push(seg);
@@ -370,6 +376,7 @@ export function startLoopback(preserveTimeline = false, adoptVad?: VadSegmenter)
 		trackStartT = 0;
 		lastPairClass = null;
 		evidenceCutCap = -Infinity;
+		vadCuts = [];
 		pipeline = null; // built on the first chunk (needs the real sample rate)
 	}
 	lastChunkWall = Date.now();
@@ -464,8 +471,7 @@ export function stopLoopback(): void {
 	instance = null;
 	isStartingLoopback = false; // allow future restarts
 	if (pipeline) {
-		const seg = pipeline.flush();
-		if (seg) {
+		for (const seg of pipeline.flush()) {
 			console.log(`[vad] segment ${fmtSegment(seg)}`);
 			trackSegments.push(seg);
 		}
@@ -508,14 +514,12 @@ function pruneFrozenSamples(): void {
 export function restartLoopback(): void {
 	console.log("[loopback] watchdog: capture stalled, restarting (timeline preserved)");
 	if (pipeline) {
-		// flush() drains one held segment per call (merge-delayed close) —
-		// two calls empty both pending and the just-closed open segment
-		for (let i = 0; i < 2; i++) {
-			const seg = pipeline.flush();
-			if (seg) {
-				console.log(`[vad] segment ${fmtSegment(seg)}`);
-				trackSegments.push(seg);
-			}
+		vadCuts.push(captureTime()); // the point-switch replay must re-cut here
+		// flush() now drains every held segment in one call (the old
+		// two-call dance fed the single-return drop bug)
+		for (const seg of pipeline.flush()) {
+			console.log(`[vad] segment ${fmtSegment(seg)}`);
+			trackSegments.push(seg);
 		}
 	}
 	if (instance) {
@@ -542,4 +546,31 @@ const WATCHDOG_TIMEOUT = 5000; // ms without chunks while playing → restart
 export function checkLoopbackWatchdog(playing: boolean): void {
 	if (!instance || !playing) return;
 	if (Date.now() - lastChunkWall > WATCHDOG_TIMEOUT) restartLoopback();
+}
+
+// Sprint F: switch the live VAD to a new operating point. The recorded
+// capture-time stream is replayed through a fresh parameterized segmenter
+// (seek cuts and watchdog flushes re-applied, so no replayed segment spans
+// a position jump or a capture-death gap), replacing the closed-segment
+// history; the replayed segmenter then continues live with its
+// window/evidence state intact.
+export function switchVadPoint(point: VadPoint): void {
+	if (!pipeline) return;
+	const vad = new VadSegmenter(point);
+	const segs: VocalSegment[] = [];
+	const cuts = vadCuts.slice().sort((a, b) => a - b);
+	let ci = 0;
+	for (const s of energySamples) {
+		while (ci < cuts.length && s.t > cuts[ci]) {
+			for (const seg of vad.splitAt(cuts[ci])) segs.push(seg);
+			ci++;
+		}
+		const seg = vad.onFrame(s.e, SUBFRAME_SEC, s.t);
+		if (seg) segs.push(seg);
+	}
+	trackSegments = segs;
+	pipeline.adoptVad(vad);
+	console.log(
+		`[vad] operating point → h${point.headroom} E${point.enterEvidence}: replayed ${segs.length} segments over ${energySamples.length} samples`
+	);
 }

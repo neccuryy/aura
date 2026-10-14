@@ -22,7 +22,7 @@ const os = require("os");
 const https = require("https");
 const musicMetadata = require("music-metadata");
 const { VocalPipeline } = require("./dist/main/dsp.js");
-const { alignLyrics } = require("./dist/main/align.js");
+const { alignLyrics, detectOnsets, cleanSegments, countSyllables } = require("./dist/main/align.js");
 
 const CHUNK_SEC = 0.05; // the native addon polls at 50ms — mirror it
 const CACHE_DIR = path.join(__dirname, ".benchmark");
@@ -161,8 +161,7 @@ function runPipeline(pcm, channels, sampleRate) {
 		for (const e of res.energy) energy.push(e);
 		if (res.segment) segments.push(res.segment);
 	}
-	const tail = pipeline.flush();
-	if (tail) segments.push(tail);
+	for (const tail of pipeline.flush()) segments.push(tail);
 	return { segments, energy, duration: totalFrames / sampleRate };
 }
 
@@ -179,6 +178,29 @@ async function decodeMp3(file) {
 	for (let c = 0; c < channels; c++)
 		for (let i = 0; i < n; i++) interleaved[i * channels + c] = pcm.channelData[c][i];
 	return { pcm: interleaved, channels, sampleRate: pcm.sampleRate };
+}
+
+// pipeline cache: segments+energy are deterministic per file — decode and
+// DSP once, then every algorithm-tuning rerun is DP-only (seconds, not
+// minutes). Keyed by path+mtime+size; delete .benchmark/pipe to invalidate
+const PIPE_DIR = path.join(CACHE_DIR, "pipe");
+
+async function pipelineFor(mp3) {
+	const st = fs.statSync(mp3);
+	const key = require("crypto")
+		.createHash("md5")
+		.update(`${mp3}|${st.mtimeMs}|${st.size}`)
+		.digest("hex");
+	const cached = path.join(PIPE_DIR, `${key}.json`);
+	if (fs.existsSync(cached)) {
+		const j = JSON.parse(fs.readFileSync(cached, "utf8"));
+		return { segments: j.segments, energy: j.energy, duration: j.duration };
+	}
+	const decoded = await decodeMp3(mp3);
+	const out = runPipeline(decoded.pcm, decoded.channels, decoded.sampleRate);
+	fs.mkdirSync(PIPE_DIR, { recursive: true });
+	fs.writeFileSync(cached, JSON.stringify(out));
+	return out;
 }
 
 // ---------- scoring ----------
@@ -239,6 +261,23 @@ function fmtClass(c) {
 	return `${c.count} (mae ${((c.absSum / c.count) * 1000).toFixed(0)}ms)`;
 }
 
+// Sprint E diagnostic: the truth-implied ms/syllable — median over
+// consecutive truth line pairs of (spacing ÷ syllables of the starting
+// line). Section breaks (>12s) and vowel-less lines aren't pacing
+function medianTruthRate(lines) {
+	const rates = [];
+	for (let i = 1; i < lines.length; i++) {
+		const dt = lines[i].time - lines[i - 1].time;
+		if (dt <= 0 || dt > 12) continue;
+		const syl = countSyllables(lines[i - 1].text);
+		if (syl <= 0) continue;
+		rates.push((dt / syl) * 1000);
+	}
+	if (rates.length < 5) return -1;
+	rates.sort((a, b) => a - b);
+	return Math.round(rates[Math.floor(rates.length / 2)]);
+}
+
 // ---------- main ----------
 
 async function runBenchmark(filter) {
@@ -271,15 +310,15 @@ async function runBenchmark(filter) {
 			skipped++;
 			continue;
 		}
-		let decoded;
+		let piped;
 		try {
-			decoded = await decodeMp3(mp3);
+			piped = await pipelineFor(mp3);
 		} catch (e) {
 			console.log(`${name}: decode failed (${e.message}) — skipped`);
 			skipped++;
 			continue;
 		}
-		const { segments, energy, duration } = runPipeline(decoded.pcm, decoded.channels, decoded.sampleRate);
+		const { segments, energy, duration } = piped;
 		const stats = {};
 		const aligned = alignLyrics(
 			truth.lines.map((l) => ({ text: l.text })), segments, duration, energy, stats
@@ -296,6 +335,10 @@ async function runBenchmark(filter) {
 			if (d <= 0.5) within++;
 		}
 		const { classes, driftTrack } = classify(aligned, truth.lines, stats.lineSeg || []);
+		// Sprint E diagnostic: the truth-implied rate (median line-start
+		// spacing ÷ syllables of the starting line) vs the autocorrelation
+		// estimate vs the rate the grid search picked
+		const truthRate = medianTruthRate(truth.lines);
 		const mae = abs / truth.lines.length;
 		totalAbs += abs;
 		totalCount += truth.lines.length;
@@ -311,6 +354,8 @@ async function runBenchmark(filter) {
 			),
 			driftTrack,
 			rate: stats.rate,
+			tempo: stats.tempo,
+			truthRate,
 			anchored: stats.anchored,
 			segsUsed: stats.segsUsed,
 			segsSkipped: stats.segsSkipped,
@@ -321,7 +366,7 @@ async function runBenchmark(filter) {
 			`${name}: MAE ${(mae * 1000).toFixed(0)}ms, ≤500ms ${((within / truth.lines.length) * 100).toFixed(0)}% (${truth.source})` +
 			` | interp ${fmtClass(classes.interpolated)}, cram ${fmtClass(classes.crammed)}` +
 			`, drift ${fmtClass(classes.drift)}${driftTrack ? "!" : ""}, tail ${fmtClass(classes.tailShift)}` +
-			` | rate ${stats.rate}, anchored ${stats.anchored}/${truth.lines.length}, segs ${stats.segsUsed}+${stats.segsSkipped} of ${segments.length}`
+			` | rate ${stats.rate} (truth ${truthRate}, tempo ${stats.tempo ?? -1}), anchored ${stats.anchored}/${truth.lines.length}, segs ${stats.segsUsed}+${stats.segsSkipped} of ${segments.length}`
 		);
 	}
 
@@ -381,10 +426,100 @@ function compareRuns() {
 	);
 }
 
+// Sprint D: validate the onset detector against ground truth BEFORE wiring
+// numbers into the alignment — recall (truth line starts with an onset
+// within ±300ms) and precision (onsets that match a truth line start).
+// Candidates mirror the align wiring: segment starts + interior onsets.
+async function onsetReport(filter) {
+	const folders = musicFolders();
+	if (!folders.length) {
+		console.log("no musicFolders in config — add folders in the app settings first");
+		return;
+	}
+	const mp3s = [];
+	for (const f of folders) walk(f, mp3s);
+	const selected = mp3s.filter((f) => !filter || path.basename(f).includes(filter));
+	console.log(`onset validation: ${selected.length}/${mp3s.length} mp3 files\n`);
+	const WIN = 0.3;
+	let totTruth = 0, totMatched = 0, totOnsets = 0, totPrecise = 0;
+	for (const mp3 of selected) {
+		const name = path.basename(mp3);
+		let meta = { title: "", artist: "", duration: 0 };
+		try {
+			const m = await musicMetadata.parseFile(mp3, { duration: false });
+			meta = {
+				title: m.common.title || "",
+				artist: m.common.artist || m.common.albumartist || "",
+				duration: (m.format && m.format.duration) || 0
+			};
+		} catch (_e) { /* tags unreadable — filename only */ }
+		const truth = await groundTruth(mp3, meta);
+		if (!truth) continue;
+		let piped;
+		try {
+			piped = await pipelineFor(mp3);
+		} catch (e) {
+			console.log(`${name}: decode failed (${e.message}) — skipped`);
+			continue;
+		}
+		const { segments, energy } = piped;
+		const segs = cleanSegments(segments);
+		const cands = [];
+		for (const s of segs) {
+			cands.push(s.start);
+			for (const t of detectOnsets(energy, s.start, s.end)) cands.push(t);
+		}
+		cands.sort((a, b) => a - b);
+		const starts = truth.lines.map((l) => l.time);
+		let matched = 0;
+		for (const t of starts) {
+			let best = Infinity;
+			for (const c of cands) {
+				const d = Math.abs(c - t);
+				if (d < best) best = d;
+				if (c > t + WIN) break;
+			}
+			if (best <= WIN) matched++;
+		}
+		let precise = 0;
+		for (const c of cands) {
+			let best = Infinity;
+			for (const t of starts) {
+				const d = Math.abs(c - t);
+				if (d < best) best = d;
+				if (t > c + WIN) break;
+			}
+			if (best <= WIN) precise++;
+		}
+		totTruth += starts.length;
+		totMatched += matched;
+		totOnsets += cands.length;
+		totPrecise += precise;
+		console.log(
+			`${name}: recall ${(matched / starts.length * 100).toFixed(0)}% (${matched}/${starts.length})` +
+			`, precision ${(precise / Math.max(1, cands.length) * 100).toFixed(0)}% (${precise}/${cands.length})` +
+			`, ${segs.length} segs`
+		);
+	}
+	if (!totTruth) {
+		console.log("\nnothing to validate — corpus empty");
+		return;
+	}
+	console.log("=".repeat(90));
+	console.log(
+		`OVERALL: recall ${(totMatched / totTruth * 100).toFixed(1)}% (${totMatched}/${totTruth})` +
+		`, precision ${(totPrecise / Math.max(1, totOnsets) * 100).toFixed(1)}% (${totPrecise}/${totOnsets})`
+	);
+}
+
 async function main() {
 	const arg = process.argv[2] || "";
 	if (arg === "--compare") {
 		compareRuns();
+		return;
+	}
+	if (arg === "--onsets") {
+		await onsetReport(process.argv[3] || "");
 		return;
 	}
 	await runBenchmark(arg);

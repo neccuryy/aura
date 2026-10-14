@@ -331,8 +331,12 @@ export interface LookupOutcome {
 	geniusPending: boolean;
 }
 
-// full pipeline: Lrclib first (synced lyrics when available), then Genius
-// (plain lyrics) for tracks Lrclib doesn't have at all.
+// full pipeline: Lrclib first (a SYNCED hit beats everything — it needs no
+// alignment at all). When there is no synced version, Genius plain text is
+// the priority winner — its text is fuller and matches the song more
+// exactly (user-observed), and the aura alignment builds on it; Lrclib
+// plain text stays as the fallback (no Genius token / Genius miss) and a
+// switcher candidate.
 // strict = manual retry after a wrong match: exact title, no fuzzy anything.
 export async function lookupLyrics(
 	title: string,
@@ -365,9 +369,11 @@ export async function lookupLyrics(
 		return { result: lrclibHit, candidates: [lrclibHit], fromCache: false, lrclibPending: false, lrclibVerify: false, geniusPending: false };
 	}
 
-	// Lrclib gave plain text (or nothing) — Genius is both the fallback and
-	// a switchable alternative, so query it either way; a synced Lrclib hit
-	// above skips Genius entirely (nothing there can beat synced timings)
+	// Lrclib gave plain text (or nothing) — Genius is the priority winner
+	// for the no-synced case (fuller text, exact match — the aura alignment
+	// builds on it); query it either way, it is also a switcher candidate.
+	// A synced Lrclib hit above skips Genius entirely (nothing there can
+	// beat synced timings)
 	let geniusResult: OnlineLyrics | null = null;
 	let geniusDefinitive = true; // no token → Genius doesn't affect the verdict
 	let geniusPending = false;
@@ -380,8 +386,8 @@ export async function lookupLyrics(
 		}
 	}
 	const candidates: OnlineLyrics[] = [];
-	if (lrclib.result) candidates.push(lrclib.result);
 	if (geniusResult) candidates.push(geniusResult);
+	if (lrclib.result) candidates.push(lrclib.result);
 
 	if (!lrclib.definitive) {
 		// Lrclib never actually answered — show whatever Genius found but
@@ -392,12 +398,12 @@ export async function lookupLyrics(
 
 	// negative-cache only when the whole pipeline answered definitively —
 	// a network error anywhere must not poison the cache
-	if (!fresh) writeCache(artist, title, lrclib.result || geniusResult, geniusDefinitive);
+	if (!fresh) writeCache(artist, title, geniusResult || lrclib.result, geniusDefinitive);
 	// Lrclib's definitive "no" sometimes flakes — when Genius covered the
 	// track (and Lrclib gave nothing at all), re-check Lrclib once in the
 	// background
 	return {
-		result: lrclib.result || geniusResult,
+		result: geniusResult || lrclib.result,
 		candidates,
 		fromCache: false,
 		lrclibPending: false,
@@ -455,10 +461,10 @@ const GENIUS_PURSUE_DELAYS = [5000, 20000, 60000];
 // Background Genius priority: Genius answered transiently (403 rate limit,
 // timeout) while the screen shows the fallback (Lrclib plain text or the
 // "not found" note) — keep retrying Genius. When it finally answers: a hit
-// becomes the cached verdict when there is no fallback at all (and the
-// caller upgrades the display), or just a switcher candidate next to the
-// Lrclib text; a definitive miss confirms the fallback; exhaustion leaves
-// the cache as is so the next play retries the whole chain naturally.
+// becomes the cached verdict and upgrades the display (Genius is the
+// priority winner for the no-synced case); a definitive miss confirms the
+// fallback; exhaustion leaves the cache as is so the next play retries the
+// whole chain naturally.
 export async function pursueGenius(
 	title: string,
 	artist: string | undefined,
@@ -471,9 +477,9 @@ export async function pursueGenius(
 		await sleep(delay);
 		const genius = await getGeniusLyrics(title, artist, geniusToken, strict);
 		if (genius.result) {
-			// Lrclib plain text stays the priority winner — Genius only
-			// becomes the cached verdict when there is no fallback at all
-			writeCache(artist, title, fallback ?? genius.result, true);
+			// Genius is the priority winner — its text becomes the cached
+			// verdict (and the caller upgrades the display to it)
+			writeCache(artist, title, genius.result, true);
 			onResolved(genius.result);
 			return;
 		}

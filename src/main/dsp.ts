@@ -107,15 +107,23 @@ export interface VocalSegment {
 //    several times a second; pads/sustained guitars modulate near 0 Hz
 //  - zero-crossing rate: hi-hats/cymbals leakage sits at the top of the
 //    band, voiced vocals at the bottom
-// VLS = bandpassedRMS × R_mod × zcrGate, computed per 20 ms sub-frame.
+// VLS = bandpassedRMS × R_mod, computed per 20 ms sub-frame.
 
-const SUBFRAME_SEC = 0.02;   // 20 ms — envelope rate 50 Hz (plan §3.2)
+export const SUBFRAME_SEC = 0.02; // 20 ms — envelope rate 50 Hz (plan §3.2)
 const ENV_FRAMES = 50;       // 1 s of envelope history for R_mod
 const MOD_HP = 3;            // Hz — syllable modulation band
 const MOD_LP = 8;
-const ZCR_HIGH = 0.35;       // crossings/sample — above this reads as
-                             // percussion/noise leakage, not voice
-const ZCR_GATE_LOW = 0.1;    // gate value when ZCR is too high
+// A global floor on R_mod (vls = rms × max(rmod, F)) was tried for layer 1
+// (VAD recall) and REJECTED by benchmark: F=0.5 scored 14374ms vs the 6604ms
+// base (+118%). The floor keeps instrumental interludes above the threshold
+// too — the VAD never exits, segments fuse into mega-segments (rawSegs
+// 25→9 on ангелы, 36→9 on игрушка) and the DP loses its boundaries. The
+// bed is NOT at the p20 level during loud sections — p20 tracks the quiet
+// parts, so "4× below threshold" reasoning does not hold there.
+// (The old ZCR gate is gone: after the 3.4 kHz lowpass, zcr 0.35 crossings/
+// sample is unreachable — a 3.4 kHz sine at 48 kHz crosses ~0.14/sample —
+// it fired 0/433 times on the corpus. zcr stays in the feature dump for
+// diagnostics only.)
 
 export interface SubframeFeatures {
 	t: number;
@@ -171,9 +179,8 @@ export class VocalScorer {
 			const envRms = Math.sqrt(envSq / this.env.length);
 			const modRms = Math.sqrt(modSq / this.envMod.length);
 			const rmod = envRms > 1e-4 ? modRms / envRms : 0;
-			const zcrGate = zcr > ZCR_HIGH ? ZCR_GATE_LOW : 1;
 			const t = tStart + off / this.subFrames * SUBFRAME_SEC;
-			out.push({ t, rms, zcr, rmod, vls: rms * rmod * zcrGate });
+			out.push({ t, rms, zcr, rmod, vls: rms * rmod });
 		}
 		return out;
 	}
@@ -194,7 +201,7 @@ export interface PipelineChunkResult {
 export class VocalPipeline {
 	private readonly isolator: VoiceIsolator;
 	private readonly scorer: VocalScorer;
-	readonly vad: VadSegmenter;
+	vad: VadSegmenter; // swapped whole by the per-track calibrator (Sprint F)
 	private midBuf: Float32Array;
 	private sideBuf: Float32Array;
 
@@ -204,6 +211,12 @@ export class VocalPipeline {
 		this.vad = adoptVad || new VadSegmenter();
 		this.midBuf = new Float32Array(0);
 		this.sideBuf = new Float32Array(0);
+	}
+
+	// Sprint F: swap in a re-parameterized, replayed VAD (per-track
+	// calibration switch) — isolator/scorer state is point-independent
+	adoptVad(vad: VadSegmenter): void {
+		this.vad = vad;
 	}
 
 	// input: interleaved float32 PCM (any channel count ≥ 1)
@@ -236,7 +249,7 @@ export class VocalPipeline {
 	}
 
 	// drain merge-delayed segments on capture stop
-	flush(): VocalSegment | null {
+	flush(): VocalSegment[] {
 		return this.vad.flush();
 	}
 
@@ -253,24 +266,58 @@ export class VocalPipeline {
 // The noise floor adapts (drops instantly to quiet frames, creeps up slowly
 // toward louder ones), so the threshold tracks the instrumental bed of the
 // mix instead of a fixed absolute level.
-const ENTER_TIME = 0.15; // s of voice above threshold to open a segment
+// ENTER: evidence accumulator instead of a continuous above-threshold run.
+// +1 per above-threshold frame, −ENTER_DECAY per below-threshold frame,
+// open at ENTER_EVIDENCE net frames (~80 ms net). Measured on the corpus:
+// 84% of missed line starts were above-threshold bursts fragmented by R_mod
+// dips — shorter than a continuous 150 ms run (114 of 245 even < 40 ms), so
+// a continuous ENTER_TIME can never catch them no matter how low. The
+// accumulator counts fragmented activity (1 1 0 1 1 0 1 1 1 → 4) instead of
+// resetting on every dip. Offline sim on real features: onset recall
+// 36.3% → 46.5% with the exit condition untouched — the rmod-floor lesson:
+// never weaken the HOLD condition (it fused segments through instrumental
+// interludes, +118% MAE).
+const ENTER_EVIDENCE = 4;  // net above-threshold frames to open a segment
+const ENTER_DECAY = 0.5;   // evidence lost per below-threshold frame
 const EXIT_TIME = 0.4;   // s below to close — hangover bridges short breaths
 const MIN_SEGMENT = 0.3; // s — drop blips (system sounds, clicks)
 const MERGE_GAP = 0.3;   // s — bridge short pauses inside a sung line
-const FLOOR_HEADROOM = 2;   // threshold = noise floor × this
+const FLOOR_HEADROOM = 2;       // threshold = noise floor × this
 const FLOOR_ABS = 0.001;    // absolute threshold floor (digital-silence guard)
 const FLOOR_WINDOW = 100;   // frames (2s at 20ms sub-frames) for the floor
 const FLOOR_PERCENTILE = 0.2; // 20th percentile of the window = the bed level
 
+// Sprint F: a VAD operating point. One global point overfits (the offline
+// sweep on 32 tracks: buried AI vocals need a low threshold, ordinary
+// mixes are already served by the default) — the live calibrator
+// (calibrate.ts) picks a point per track; the default is what production
+// used before and stays the fallback.
+export interface VadPoint {
+	headroom: number;      // threshold = noise floor × this
+	enterEvidence: number; // net above-threshold frames to open a segment
+}
+export const DEFAULT_VAD_POINT: VadPoint = {
+	headroom: FLOOR_HEADROOM,
+	enterEvidence: ENTER_EVIDENCE
+};
+
 export class VadSegmenter {
+	readonly headroom: number;      // operating point (Sprint F)
+	readonly enterEvidence: number;
 	private readonly window: number[] = []; // recent effective-frame RMS values
 	private sorted: number[] = [];
 	private inSegment = false;
 	private segStart = 0;
-	private aboveTime = 0;
+	private evidence = 0;      // net above-threshold frames (enter accumulator)
+	private evidenceStart = 0; // first frame of the current evidence stretch
 	private belowTime = 0;
 	private lastT = 0;
 	private pending: VocalSegment | null = null; // held for possible merge
+
+	constructor(point: VadPoint = DEFAULT_VAD_POINT) {
+		this.headroom = point.headroom;
+		this.enterEvidence = point.enterEvidence;
+	}
 
 	get active(): boolean {
 		return this.inSegment;
@@ -281,7 +328,7 @@ export class VadSegmenter {
 	}
 
 	private noiseFloor(): number {
-		if (this.window.length === 0) return FLOOR_ABS / FLOOR_HEADROOM;
+		if (this.window.length === 0) return FLOOR_ABS / this.headroom;
 		// percentile of the recent window — robust against both blips
 		// (a single quiet frame no longer collapses the floor) and vocal
 		// passages (a few loud frames no longer drag it up)
@@ -294,7 +341,7 @@ export class VadSegmenter {
 	}
 
 	get threshold(): number {
-		return Math.max(this.noiseFloor() * FLOOR_HEADROOM, FLOOR_ABS);
+		return Math.max(this.noiseFloor() * this.headroom, FLOOR_ABS);
 	}
 
 	// level: per-frame vocal-likelihood (VLS). The noise floor adapts to the
@@ -306,20 +353,22 @@ export class VadSegmenter {
 		this.lastT = tStart + dur;
 		this.window.push(rms);
 		if (this.window.length > FLOOR_WINDOW) this.window.shift();
-		const threshold = Math.max(this.noiseFloor() * FLOOR_HEADROOM, FLOOR_ABS);
+		const threshold = Math.max(this.noiseFloor() * this.headroom, FLOOR_ABS);
 		const speech = rms > threshold;
 
 		if (!this.inSegment) {
 			if (speech) {
-				this.aboveTime += dur;
-				if (this.aboveTime >= ENTER_TIME) {
+				if (this.evidence <= 0) this.evidenceStart = tStart;
+				this.evidence += 1;
+				if (this.evidence >= this.enterEvidence) {
 					this.inSegment = true;
-					// backdate to the first frame that went above
-					this.segStart = tStart - (this.aboveTime - dur);
+					// backdate to the first frame of the evidence stretch
+					this.segStart = this.evidenceStart;
+					this.evidence = 0;
 					this.belowTime = 0;
 				}
 			} else {
-				this.aboveTime = 0;
+				this.evidence = Math.max(0, this.evidence - ENTER_DECAY);
 			}
 			return null;
 		}
@@ -338,7 +387,7 @@ export class VadSegmenter {
 
 	private close(end: number): VocalSegment | null {
 		this.inSegment = false;
-		this.aboveTime = 0;
+		this.evidence = 0;
 		this.belowTime = 0;
 		const seg: VocalSegment = { start: this.segStart, end };
 		if (seg.end - seg.start < MIN_SEGMENT) return null;
@@ -351,10 +400,19 @@ export class VadSegmenter {
 		return out;
 	}
 
-	// final drain on capture stop
-	flush(): VocalSegment | null {
-		if (this.inSegment) this.close(this.lastT);
-		const out = this.pending;
+	// final drain on capture stop — returns EVERY held segment: the
+	// merge-delayed holder plus the just-closed one. The old single-return
+	// flush silently DROPPED the held segment when the final close didn't
+	// merge into it (close() returns the old pending, which flush ignored)
+	// — measured: it cost the second-to-last segment of tracks that end
+	// mid-vocal (3/18 real-corpus tracks, e.g. ВЫКЛЮЧАТЕЛЬ 5257→1752ms)
+	flush(): VocalSegment[] {
+		const out: VocalSegment[] = [];
+		if (this.inSegment) {
+			const held = this.close(this.lastT);
+			if (held) out.push(held);
+		}
+		if (this.pending) out.push(this.pending);
 		this.pending = null;
 		return out;
 	}
@@ -370,7 +428,7 @@ export class VadSegmenter {
 		}
 		const seg: VocalSegment = { start: this.segStart, end: t };
 		this.segStart = t;
-		this.aboveTime = 0;
+		this.evidence = 0;
 		this.belowTime = 0;
 		const out: VocalSegment[] = [];
 		if (this.pending) out.push(this.pending);
@@ -378,4 +436,25 @@ export class VadSegmenter {
 		this.pending = null;
 		return out;
 	}
+}
+
+// Sprint F: re-segment a recorded vls stream at an arbitrary operating
+// point — a fresh parameterized VadSegmenter replayed over the samples.
+// Segmentation is a pure function of the stream + point (proven by the
+// offline sweep), so the live calibrator scores alternative points on
+// the heard prefix with exactly the production segmenter logic. Returns
+// the closed segments (merge-delayed holder drained, the still-open
+// segment closed at the last sample).
+export function resegmentStream(
+	samples: { t: number; v: number }[],
+	point: VadPoint
+): VocalSegment[] {
+	const vad = new VadSegmenter(point);
+	const segs: VocalSegment[] = [];
+	for (const s of samples) {
+		const seg = vad.onFrame(s.v, SUBFRAME_SEC, s.t);
+		if (seg) segs.push(seg);
+	}
+	for (const seg of vad.flush()) segs.push(seg);
+	return segs;
 }

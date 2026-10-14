@@ -10,8 +10,10 @@ import { parseLrc, decodeLrcBuffer } from "./lrc";
 import { extractPalette } from "./palette";
 import { getFallbackCover, artWidth } from "./cover";
 import { lookupLyrics, pursueLrclib, pursueGenius, verifyLrclib, clearLyricsCache, saveAlignedLyrics, lyricsCacheStats, clearAllLyricsCache } from "./lrclib";
-import { startLoopback, stopLoopback, beginTrack, noteTrackPosition, getTrackSegments, getTrackEnergy, checkLoopbackWatchdog } from "./loopback";
+import { startLoopback, stopLoopback, beginTrack, noteTrackPosition, getTrackSegments, getTrackEnergy, checkLoopbackWatchdog, switchVadPoint } from "./loopback";
 import { alignLyrics, AlignStats, AnchorLocker } from "./align";
+import { DEFAULT_VAD_POINT } from "./dsp";
+import { calibrateVadPoint, samePoint, CALIB_MIN_HEARD } from "./calibrate";
 
 interface TrackPayload {
 	empty: boolean;
@@ -64,6 +66,7 @@ let alignLastRun = 0;         // throttle for live re-alignment
 let alignLastPos = -1;        // position of the last DP run (pause skip)
 let alignMaxPos = 0;          // furthest SMTC position seen while aligning —
                               // completion metric of the cache quality gate
+let vadCalibrated = false;    // Sprint F: the per-track VAD point check ran
 
 // Anchor Locking (план item 4): passed lines with a stable segment binding
 // freeze — later DP runs solve only the remainder, so the highlight never
@@ -234,6 +237,27 @@ function maybeRunAlignment(position: number): void {
 	// the DP re-run (it produced identical output every 5s)
 	if (Math.abs(position - alignLastPos) < 0.05) return;
 	alignLastPos = position;
+	// Sprint F per-track calibration: once, when enough stream is heard,
+	// decide the VAD operating point. Tempo confident on the segment-gated
+	// envelope = ordinary mix (the default point hears the vocals — don't
+	// touch it); tempo abstain = buried-vocal regime → switch the point and
+	// replay the recorded stream at it
+	if (!vadCalibrated) {
+		const energy = getTrackEnergy();
+		const heard = energy.length >= 2 ? energy[energy.length - 1].t - energy[0].t : 0;
+		if (heard >= CALIB_MIN_HEARD) {
+			vadCalibrated = true;
+			const point = calibrateVadPoint(energy, getTrackSegments(), alignLines, trackLength);
+			if (!samePoint(point, DEFAULT_VAD_POINT)) {
+				switchVadPoint(point);
+				// anchors locked under the deaf point are guesses — re-derive
+				alignLocker.reset();
+				console.log(`[calib] VAD point → h${point.headroom} E${point.enterEvidence} (tempo abstained at the default point)`);
+			} else {
+				console.log("[calib] VAD point stays default (tempo confident, or the default fits best)");
+			}
+		}
+	}
 	const segs = getTrackSegments();
 	if (segs.length < ALIGN_MIN_SEGMENTS) return;
 	const stats: Partial<AlignStats> = {};
@@ -457,6 +481,7 @@ async function handleUpdate(update: Update | null): Promise<boolean> {
 			finalizeAlignment();
 			beginTrack();
 			alignSyncedSeen = false;
+			vadCalibrated = false;
 			resetSources();
 			lastTrackId = null;
 			lastStatus = null;
@@ -486,6 +511,7 @@ async function handleUpdate(update: Update | null): Promise<boolean> {
 		finalizeAlignment();
 		beginTrack();
 		alignSyncedSeen = false;
+		vadCalibrated = false;
 		lastTrackId = id;
 		lastStatus = null;
 		lastTrackTitle = update.metadata.title;

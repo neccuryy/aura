@@ -29,6 +29,7 @@ export interface AlignStats {
 	segsSkipped: number; // segments skipped as unexplained
 	cost: number; // total DP cost of the chosen alignment
 	rate: number; // ms/syllable chosen by the per-track grid search
+	tempo?: number; // Sprint E: autocorrelation tempo estimate (ms/syllable), -1 = none
 	expected: number; // total expected sung duration at that rate (s)
 	refined: AlignSegment[]; // segment list after energy-dip splitting
 	lineSeg?: number[]; // live: per-line anchor segment (group's last seg), -1 = interpolated
@@ -38,6 +39,7 @@ export interface AlignStats {
 	lineSpan?: number[]; // live: per-line anchor group wall span, -1 = interpolated
 	rawBlocks?: number; // live: raw VAD blocks heard — maturity of the level estimate
 	normCost?: number; // live: DP cost per second of segment evidence (план item 6)
+	fitSym?: number; // Sprint F: symmetric fit of the chosen pass-1 partition — the per-track calibration selector
 }
 
 // Anchor Locking (план item 4): lines the playback position has passed
@@ -62,6 +64,9 @@ const MIN_LINE_DURATION = 0.4; // s — even a short line takes at least this
 // NEXT block, cascading shifts across the whole track
 const MAX_LINES_PER_SEGMENT = 10;
 const MAX_SEGMENTS_PER_LINE = 3;
+// fastest real sung line — the physical cram floor for the DP's k-lines
+// move (a 0.5s slice cannot hold 7 lines, whatever the under-span price)
+const CAP_LINE_SEC = 0.55;
 
 // cost weights, per second
 // asymmetric mismatch: a group's expected sung time running PAST its
@@ -71,6 +76,14 @@ const MAX_SEGMENTS_PER_LINE = 3;
 // (over-span) means something else is singing there — full price.
 export const W_MIS_UNDER = 0.35; // exp sum exceeds segment span — VAD clipped
 export const W_MIS_OVER = 1.0;   // segment span exceeds exp sum — suspicious
+// skipping a line the VAD never heard is the HONEST answer (its time is
+// interpolated between anchored neighbors — bounded error); cramming it
+// into an already-paid segment is cheap (under-span 0.35/s) but displaces
+// every later line (игрушка: VAD misses a third of the vocals, 73 lines
+// crammed into 48 slices, whole-track phase shift). At 1.0/s skipping was
+// 3× dearer than cramming — the DP anchored 100% of lines on every track.
+// Priced just above under-span so a line crams only when its segment
+// really has room for it
 export const W_SKIP_LINE = 1.0; // expected line time the vocal evidence doesn't cover
 
 // skip-price weights, per second of unexplained segment. Sustained
@@ -115,10 +128,150 @@ const SILENCE_CAP = 4.0; // s of chargeable gap excess per boundary
 const SUPER_GAP = 2.0; // s — max pause inside a block
 
 // per-track tempo grid — the median rate (230) is wrong for fast rap (~205)
-// and slow singing; the DP fit cost itself picks the best rate per track
+// and slow singing; the DP fit cost itself picks the best rate per track.
+// 360: corpus truth spacings reach 3.99s/11.4 sylls ≈ 350 (тёмные души) —
+// a smaller cap puts the truth peak outside every grid candidate
 const RATE_MIN = 150;
-const RATE_MAX = 280;
+const RATE_MAX = 360;
 const RATE_STEP = 10;
+
+// ── Sprint E (план v2): tempo from envelope autocorrelation ──────────────
+// On hard tracks (sparse anchors) the grid-search fit cost is flat across
+// rates and the floor (150) wins by tie-break — every such track aligns at
+// the same wrong tempo. The envelope itself knows the tempo: line starts
+// are quasi-periodic, so the autocorrelation of the mean-removed vocal
+// energy peaks at the typical line-start spacing. Spacing ÷
+// syllables-per-line = ms/syllable — a measurement, not a fit.
+// No peak-picking: short-lag beat/bar peaks sit at ~0.6–1s nearly as
+// strong as the line peak, and any "first strong smaller peak" rule
+// grabs them (measured: 13/14 tracks collapsed to the 150 floor that
+// way). Instead every GRID RATE is scored directly by the acf support at
+// its implied spacing P = rate×avgSylls — the beat peaks simply never
+// get a candidate of their own. A candidate whose DOUBLE has stronger
+// support than itself is a half-period — discounted. Ambiguous verdicts
+// (weak support or no margin over the runner-up) abstain (-1): the pure
+// fit cost decides as before. The winner enters both grid searches as a
+// SOFT prior — on good tracks the fit cost has real signal and dominates.
+const TEMPO_MIN_LAG = 0.6; // s — below this, syllable bursts dominate
+const TEMPO_MAX_LAG = 4.5; // s — lines rarely start slower than this
+const TEMPO_MIN_ACF = 0.18; // support floor — below is noise, abstain
+const TEMPO_MARGIN = 1.1; // winner must beat the runner-up by this
+// the fit landscape cannot identify the rate at ~50% VAD recall (heard
+// segment time ≈ half the true sung time, so duration tiling always
+// prefers the floor) — the autocorrelation estimate is the only honest
+// rate signal, so it decides whenever it exists; 0.25/ms overpowers the
+// flat fit landscape but still yields to a strongly conflicting fit
+const W_RATE_PRIOR = 0.25; // fit-cost penalty per ms/syllable of deviation
+
+export interface TempoEstimate {
+	rate: number;   // best grid rate, -1 = abstain
+	score: number;  // acf support of the best rate (0 when nothing scored)
+	second: number; // best score of a DIFFERENT competing peak (margin check)
+}
+
+// Sprint F: the score/margin behind estimateTempo — the per-track VAD
+// calibration sweep selects operating points partly by tempo confidence,
+// which the bare rate cannot express
+export function estimateTempoScored(energy: EnergySample[], avgSylls: number): TempoEstimate {
+	if (avgSylls <= 0 || energy.length < 60) return { rate: -1, score: 0, second: 0 };
+	const t0 = energy[0].t;
+	const t1 = energy[energy.length - 1].t;
+	if (t1 - t0 < 12) return { rate: -1, score: 0, second: 0 }; // need ≥ ~3 periods of the longest lag
+	// resample onto a uniform grid (capture chunks are ~uniform; bin-average
+	// to be safe against jitter and dropped chunks)
+	const dts: number[] = [];
+	for (let i = 1; i < energy.length; i++) dts.push(energy[i].t - energy[i - 1].t);
+	dts.sort((a, b) => a - b);
+	const dt = dts[Math.floor(dts.length / 2)] || 0.05;
+	const n = Math.floor((t1 - t0) / dt) + 1;
+	if (n < 60) return { rate: -1, score: 0, second: 0 };
+	const grid = new Array<number>(n).fill(0);
+	const cnt = new Array<number>(n).fill(0);
+	for (const s of energy) {
+		const k = Math.min(n - 1, Math.max(0, Math.round((s.t - t0) / dt)));
+		grid[k] += s.e;
+		cnt[k]++;
+	}
+	const x = new Array<number>(n);
+	let mean = 0;
+	for (let k = 0; k < n; k++) {
+		grid[k] = cnt[k] ? grid[k] / cnt[k] : 0;
+		mean += grid[k];
+	}
+	mean /= n;
+	let ms = 0;
+	for (let k = 0; k < n; k++) {
+		x[k] = grid[k] - mean;
+		ms += x[k] * x[k];
+	}
+	if (ms <= 0) return { rate: -1, score: 0, second: 0 };
+	const lo = Math.max(1, Math.round(TEMPO_MIN_LAG / dt));
+	const hi = Math.min(n - 2, Math.round(TEMPO_MAX_LAG / dt));
+	if (hi <= lo) return { rate: -1, score: 0, second: 0 };
+	// normalized autocorrelation, lightly smoothed (3-tap) against bin noise
+	const acf = new Array<number>(hi + 1).fill(0);
+	for (let L = lo; L <= hi; L++) {
+		let s = 0;
+		for (let k = 0; k + L < n; k++) s += x[k] * x[k + L];
+		acf[L] = s / ms;
+	}
+	const sm = new Array<number>(hi + 1).fill(0);
+	for (let L = lo; L <= hi; L++) {
+		let s = 0;
+		let c = 0;
+		for (let d = -1; d <= 1; d++) {
+			const L2 = L + d;
+			if (L2 >= lo && L2 <= hi) {
+				s += acf[L2];
+				c++;
+			}
+		}
+		sm[L] = s / c;
+	}
+	// support at lag t: best smoothed acf bin within ±2 bins (±~100ms — a
+	// candidate spacing rarely lands on the peak bin, and ±1 bin measured
+	// as a miss on real peaks: не.кури P(290)=3.16s vs peak 3.2s)
+	const support = (t: number): number => {
+		const L = Math.round(t / dt);
+		if (L < lo || L > hi) return 0;
+		let best = 0;
+		for (let d = -2; d <= 2; d++) {
+			const L2 = L + d;
+			if (L2 >= lo && L2 <= hi && sm[L2] > best) best = sm[L2];
+		}
+		return best;
+	};
+	// score every grid rate by the acf support at its implied line spacing;
+	// a stronger double discounts a half-period candidate
+	const scores: { rate: number; P: number; score: number }[] = [];
+	for (let rate = RATE_MIN; rate <= RATE_MAX; rate += RATE_STEP) {
+		const P = (rate * avgSylls) / 1000;
+		const a1 = support(P);
+		if (a1 <= 0) continue;
+		const a2 = support(2 * P);
+		scores.push({ rate, P, score: a1 - Math.max(0, a2 - a1) });
+	}
+	if (!scores.length) return { rate: -1, score: 0, second: 0 };
+	scores.sort((a, b) => b.score - a.score);
+	const best = scores[0];
+	// the margin runner-up must be a DIFFERENT peak: adjacent grid rates
+	// share the same acf peak through the ±2-bin support window (their
+	// implied spacings differ by ~avgSylls×10ms ≈ 2 bins) and would tie
+	// against the winner on every track — measured: 11/14 abstained that
+	// way. A competing peak is a genuinely different period hypothesis
+	let second = 0;
+	for (const s of scores) {
+		if (Math.abs(s.P - best.P) > 0.25 && s.score > second) second = s.score;
+	}
+	if (best.score < TEMPO_MIN_ACF || best.score < TEMPO_MARGIN * second) {
+		return { rate: -1, score: best.score, second }; // noise or ambiguous — no estimate
+	}
+	return { rate: best.rate, score: best.score, second };
+}
+
+export function estimateTempo(energy: EnergySample[], avgSylls: number): number {
+	return estimateTempoScored(energy, avgSylls).rate;
+}
 
 export function countSyllables(text: string): number {
 	const groups = text.toLowerCase().match(VOWELS);
@@ -130,8 +283,9 @@ export function expectedDuration(syllables: number, msPerSyllable = MS_PER_SYLLA
 }
 
 // section headers ("[Verse 1]") and blank separators carry no singable
-// content — they'd only poison the alignment
-function isAlignable(text: string): boolean {
+// content — they'd only poison the alignment. Exported for the Sprint F
+// calibrator (avgSylls/expRef must count the same lines alignLyrics does)
+export function isAlignable(text: string): boolean {
 	const t = text.trim();
 	return t.length > 0 && !/^\[.+\]$/.test(t);
 }
@@ -162,44 +316,41 @@ export function cleanSegments(segs: AlignSegment[]): AlignSegment[] {
 
 // Long VAD blocks (continuous rap vocals) carry no interior anchors, so
 // pacing error accumulates across the whole block (10s+ drift by the
-// middle). Inside a block the vocal energy still dips between lines —
-// split the block at deep local minima to give the DP real anchors.
-const SPLIT_MIN_BLOCK = 6; // s — shorter blocks aren't worth splitting
-const SPLIT_DIP_RATIO = 0.35; // dip qualifies at < 35% of the block's mean energy
-const SPLIT_MIN_GAP = 1.0; // s — minimum distance between split points
+// middle). Sprint D (план v2): every LINE-GRADE onset inside a segment
+// splits it — the DP gets a per-line anchor (a slice start) instead of a
+// duration-only group guess. Cramming surplus lines into a segment then
+// stops being the cheapest path: each surplus line either pays its own
+// skip price or displaces a real slice (paying that slice's skip price).
+// The old deep-dip splitting is subsumed: a dip deep enough to split at
+// is a rise strong enough to onset on.
+const SPLIT_MIN_SLICE = 0.3; // s — shorter slices aren't line anchors
+// tuned on the 14-track corpus (benchmark sweep): contrast 0.9 / gap 0.8 —
+// looser (0.5) cuts at syllable bursts and breaks tracks the old cram
+// solved correctly (не.кури 1.9→8.1s); tighter (1.1) changes nothing
+const SPLIT_ONSET_PARAMS: OnsetParams = {
+	smoothS: 0.06,
+	peakS: 0.7,
+	rise: 1.8,
+	contrast: 0.9, // line-grade rises only — syllable bursts stay interior
+	edge: 0.3,
+	minGap: 0.8 // s — lines rarely start faster (corpus avg ≈ 1.9s/line)
+};
+
+// Comb v1 (split onsets must sit ~k×P from the previous accepted anchor,
+// tol 0.35×P) REJECTED by benchmark: 8334ms vs 6604 base (+26%) — the
+// phase chain starts at the segment start, and 76% of segment starts are
+// themselves false anchors, so the comb locks onto a wrong phase and
+// rejects real line starts (local pacing variance exceeds ±35%). A v2
+// must chain from trusted anchors only.
 
 export function refineSegments(segs: AlignSegment[], energy: EnergySample[]): AlignSegment[] {
 	if (energy.length < 10) return segs;
 	const out: AlignSegment[] = [];
 	for (const s of segs) {
-		if (s.end - s.start < SPLIT_MIN_BLOCK) {
-			out.push(s);
-			continue;
-		}
-		const inside = energy.filter((e) => e.t >= s.start && e.t <= s.end);
-		if (inside.length < 10) {
-			out.push(s);
-			continue;
-		}
-		const mean = inside.reduce((a, b) => a + b.e, 0) / inside.length;
-		const thresh = mean * SPLIT_DIP_RATIO;
-		// group consecutive below-threshold samples into dip runs; each run
-		// splits at its end (the onset where vocals pick back up)
-		const splits: number[] = [];
-		let run: EnergySample[] | null = null;
-		for (const e of inside) {
-			if (e.e < thresh) {
-				if (run) run.push(e);
-				else run = [e];
-			} else if (run) {
-				pushSplit(splits, run, s);
-				run = null;
-			}
-		}
-		if (run) pushSplit(splits, run, s);
+		const onsets = detectOnsets(energy, s.start, s.end, SPLIT_ONSET_PARAMS);
 		let prev = s.start;
-		for (const sp of splits) {
-			if (sp - prev >= 0.5) {
+		for (const sp of onsets) {
+			if (sp - prev >= SPLIT_MIN_SLICE && s.end - sp >= SPLIT_MIN_SLICE) {
 				out.push({ start: prev, end: sp });
 				prev = sp;
 			}
@@ -209,11 +360,165 @@ export function refineSegments(segs: AlignSegment[], energy: EnergySample[]): Al
 	return out;
 }
 
-function pushSplit(splits: number[], run: EnergySample[], seg: AlignSegment): void {
-	// split at the run's end (onset), but keep it inside the segment
-	const sp = Math.min(Math.max(run[run.length - 1].t, seg.start + 0.3), seg.end - 0.3);
-	const last = splits[splits.length - 1];
-	if (splits.length === 0 || sp - last >= SPLIT_MIN_GAP) splits.push(sp);
+// ── Sprint D (план v2): onset anchors ────────────────────────────────────
+// Inside a vocal segment the envelope dips between lines and bursts at each
+// line start. A rise from a local minimum is direct evidence of a line
+// boundary — stronger than any pacing prior. detectOnsets returns the times
+// of interior rising edges in [t0, t1]: candidates for the starts of lines
+// sharing a segment (the DP's proportional split is a guess; an onset is a
+// measurement).
+const ONSET_SMOOTH_S = 0.06; // s — envelope smoothing window
+const ONSET_PEAK_S = 0.7;    // s — forward window to find the burst peak
+const ONSET_RISE = 1.8;      // peak ≥ min × this (quiet-dip rise)
+// tuned on the 14-track corpus against ground truth (.benchmark/tune.js):
+// recall saturates at 87% of the VAD ceiling (43.5% of 49.9% — half the
+// truth starts lie in VAD silence, no interior detector can reach them);
+// extra onsets (syllable bursts, precision ~23%) are fine — the snap
+// mini-DP filters candidates by pacing
+const ONSET_CONTRAST = 0.1;  // …or the rise ≥ 10% of the span's mean level
+const ONSET_EDGE = 0.3;      // onset = crossing min + 30% of (min→peak)
+const ONSET_MIN_GAP = 0.25;  // s — lines rarely start faster than this
+
+export interface OnsetParams {
+	smoothS: number;
+	peakS: number;
+	rise: number;
+	contrast: number;
+	edge: number;
+	minGap: number;
+}
+
+const ONSET_DEFAULTS: OnsetParams = {
+	smoothS: ONSET_SMOOTH_S,
+	peakS: ONSET_PEAK_S,
+	rise: ONSET_RISE,
+	contrast: ONSET_CONTRAST,
+	edge: ONSET_EDGE,
+	minGap: ONSET_MIN_GAP
+};
+
+export function detectOnsets(
+	energy: EnergySample[],
+	t0: number,
+	t1: number,
+	override?: Partial<OnsetParams>
+): number[] {
+	const P = { ...ONSET_DEFAULTS, ...override };
+	const inside = energy.filter((e) => e.t >= t0 && e.t <= t1);
+	if (inside.length < 8) return [];
+	const dts: number[] = [];
+	for (let i = 1; i < inside.length; i++) dts.push(inside[i].t - inside[i - 1].t);
+	dts.sort((a, b) => a - b);
+	const dt = dts[Math.floor(dts.length / 2)] || 0.02;
+	const smoothN = Math.max(1, Math.round(P.smoothS / (2 * dt)));
+	const n = inside.length;
+	const env = new Array<number>(n);
+	for (let i = 0; i < n; i++) {
+		const lo = Math.max(0, i - smoothN);
+		const hi = Math.min(n - 1, i + smoothN);
+		let sum = 0;
+		for (let k = lo; k <= hi; k++) sum += inside[k].e;
+		env[i] = sum / (hi - lo + 1);
+	}
+	let mean = 0;
+	for (let i = 0; i < n; i++) mean += env[i];
+	mean /= n;
+	const W = Math.max(3, Math.round(P.peakS / dt));
+	const onsets: number[] = [];
+	let last = -Infinity;
+	let i = 1;
+	while (i < n - 1) {
+		// local minimum (plateau-tolerant: ≤ both neighbors)
+		if (env[i] > env[i - 1] || env[i] > env[i + 1]) {
+			i++;
+			continue;
+		}
+		let peak = env[i];
+		for (let k = i + 1; k < Math.min(n, i + W + 1); k++) if (env[k] > peak) peak = env[k];
+		const rise = peak - env[i];
+		if (rise > 0 && (peak >= env[i] * P.rise || rise >= P.contrast * mean)) {
+			const target = env[i] + P.edge * rise;
+			let j = i + 1;
+			while (j < n && env[j] < target) j++;
+			if (j < n) {
+				const t = inside[j].t;
+				if (t - last >= P.minGap && t > t0 + 0.1 && t < t1 - 0.1) {
+					onsets.push(t);
+					last = t;
+				}
+				i = j; // resume scanning past this rise
+				continue;
+			}
+		}
+		i++;
+	}
+	return onsets;
+}
+
+// seat the lines of a shared group onto onset candidates with a mini-DP:
+// each interior line starts either at a candidate onset or at the
+// proportional fallback, minimizing deviation from pacing (prev start +
+// expected duration). Onsets must EARN the seat — the fallback costs a
+// small extra, so a candidate wins only by fitting the pacing better
+const SNAP_FALLBACK = 0.25; // s — the proportional guess costs this extra
+const SNAP_MIN_STEP = 0.12; // s — consecutive line starts can't overlap
+
+function snapToOnsets(
+	exps: number[], // per-line expected durations, group order
+	prop: number[], // proportional fallback start times
+	start: number,  // group span start (line 0's seat — the VAD onset)
+	end: number,    // group span end
+	cands: number[] // sorted interior onset candidates
+): number[] {
+	const k = exps.length;
+	const c = cands.length;
+	const INF = Infinity;
+	const dp: number[][] = [];
+	const bk: number[][] = [];
+	for (let i = 0; i < k; i++) {
+		dp.push(new Array<number>(c + 1).fill(INF));
+		bk.push(new Array<number>(c + 1).fill(-1));
+	}
+	// line 0 sits at the span start; column c is the proportional fallback
+	dp[0][c] = 0;
+	for (let i = 1; i < k; i++) {
+		for (let j1 = 0; j1 <= c; j1++) {
+			const t1 = j1 < c ? cands[j1] : prop[i];
+			if (t1 < 0 || t1 >= end - 0.05) continue;
+			let best = INF;
+			let bestJ0 = -1;
+			for (let j0 = 0; j0 <= c; j0++) {
+				const base = dp[i - 1][j0];
+				if (base === INF) continue;
+				const t0 = j0 < c ? cands[j0] : i - 1 === 0 ? start : prop[i - 1];
+				if (t1 <= t0 + SNAP_MIN_STEP) continue;
+				const cost =
+					base + Math.abs(t1 - (t0 + exps[i - 1])) + (j1 < c ? 0 : SNAP_FALLBACK);
+				if (cost < best) {
+					best = cost;
+					bestJ0 = j0;
+				}
+			}
+			dp[i][j1] = best;
+			bk[i][j1] = bestJ0;
+		}
+	}
+	let bj = -1;
+	let bc = INF;
+	for (let j = 0; j <= c; j++) {
+		if (dp[k - 1][j] < bc) {
+			bc = dp[k - 1][j];
+			bj = j;
+		}
+	}
+	if (bj < 0) return prop; // nothing feasible — keep the proportional split
+	const out = prop.slice();
+	out[0] = start;
+	for (let i = k - 1; i >= 1; i--) {
+		out[i] = bj < c ? cands[bj] : prop[i];
+		bj = bk[i][bj];
+	}
+	return out;
 }
 
 // skipped lines get interpolated times so the output stays a complete,
@@ -270,6 +575,13 @@ interface Group {
 interface DpResult {
 	cost: number;
 	fitCost: number; // mismatch + skipped segments — comparable across rates
+	// symmetric fit (|span − sum| instead of the asymmetric mismatch) of the
+	// SAME chosen path — the rate-comparison metric. The asymmetric model is
+	// correct WITHIN one rate (under-span is the normal VAD-clipped case),
+	// but comparing rates by it has a systematic gradient toward fast rates:
+	// shrinking every expected sum converts expensive over-span (1.0/s) into
+	// cheap under-span (0.35/s), so the fastest rate always looks fittest
+	fitSym: number;
 	groups: Group[];
 	segsUsed: number;
 }
@@ -457,11 +769,16 @@ export function dpSolve(
 	// Line-skip costs are excluded — they scale with the rate hypothesis
 	// itself and would bias the grid search toward slow rates
 	let fit = 0;
+	// symmetric twin of the same path — the rate-comparison metric (see
+	// DpResult.fitSym): identical terms, but |span − sum| instead of the
+	// asymmetric mismatch, so no rate direction is systematically cheaper
+	let fitSym = 0;
 	const covered = new Array<boolean>(M).fill(false);
 	for (const g of groups) {
 		const span = segs[g.segIdx + g.segCount - 1].end - segs[g.segIdx].start;
 		const sum = g.lines.reduce((s, idx) => s + exp[idx], 0);
 		fit += mismatchCost(span, sum);
+		fitSym += Math.abs(span - sum);
 		for (let k = 0; k < g.segCount; k++) {
 			const idx = g.segIdx + k;
 			covered[idx] = true;
@@ -481,7 +798,7 @@ export function dpSolve(
 		}
 		fit += W_GAP_EXCESS * Math.max(0, gap - GAP_FREE - skippedExp);
 	}
-	return { cost: dp[N][JE], fitCost: fit, groups, segsUsed };
+	return { cost: dp[N][JE], fitCost: fit, fitSym, groups, segsUsed };
 }
 
 // ---- Two-Pass DP (план item 7) ----
@@ -543,7 +860,7 @@ export function pass1Solve(
 	supers: SuperSeg[],
 	nLines: number,
 	i0: number
-): { blocks: Pass1Block[]; cost: number; fitCost: number; assigned: boolean[]; end: number } {
+): { blocks: Pass1Block[]; cost: number; fitCost: number; fitSym: number; assigned: boolean[]; end: number } {
 	const S = supers.length;
 	const INF = Infinity;
 	// dp[u][i][a]: min cost after deciding supers [0, u) with lines [i0, i)
@@ -663,7 +980,7 @@ export function pass1Solve(
 			}
 		}
 	}
-	if (bestCost === Infinity) return { blocks: [], cost: Infinity, fitCost: Infinity, assigned: [], end: 0 };
+	if (bestCost === Infinity) return { blocks: [], cost: Infinity, fitCost: Infinity, fitSym: Infinity, assigned: [], end: 0 };
 	const blocks: Pass1Block[] = [];
 	const assigned = new Array<boolean>(S).fill(false);
 	let i = bi;
@@ -681,7 +998,40 @@ export function pass1Solve(
 		a = prevA;
 	}
 	blocks.reverse();
-	return { blocks, cost: bestCost, fitCost: bestFit, assigned, end: bu };
+	// symmetric twin of the chosen partition (see DpResult.fitSym): the same
+	// boundary charges — skip prices, silence, flat-fill, surplus — but
+	// |sung − sum| instead of the asymmetric mismatch, so the rate
+	// comparison has no gradient toward fast rates
+	const blockOfSuper = new Map<number, Pass1Block>();
+	for (const b of blocks) blockOfSuper.set(supers.findIndex((s) => s.j0 === b.j0), b);
+	let fitSym = 0;
+	let assignedBefore = false;
+	for (let u = 0; u < supers.length; u++) {
+		const sup = supers[u];
+		const gapExcess =
+			assignedBefore && u > 0 ? Math.max(0, sup.start - supers[u - 1].end - GAP_FREE) : 0;
+		const b = blockOfSuper.get(u);
+		if (b) {
+			let sum = 0;
+			for (let i = b.i0; i < b.i1; i++) sum += exp[i];
+			fitSym += Math.abs(sup.sung - sum);
+			fitSym += W_FILL_FLAT * (1 - sup.voc) * sup.sung;
+			const E = sup.j1 - sup.j0;
+			const kLines = b.i1 - b.i0;
+			if (E > kLines) {
+				for (let x = 0; x < E - kLines; x++)
+					fitSym += (W_SKIP_BASE + W_SKIP_VOCAL * sup.voc) * sup.dursAsc[x];
+			}
+			fitSym +=
+				W_GAP_EXCESS *
+				Math.min(Math.max(0, gapExcess - Math.max(0, sum - sup.sung)), SILENCE_CAP);
+			assignedBefore = true;
+		} else {
+			fitSym += (W_SKIP_BASE + W_SKIP_VOCAL * sup.voc) * sup.sung;
+			if (u < bu) fitSym += W_GAP_EXCESS * Math.min(gapExcess, SILENCE_CAP);
+		}
+	}
+	return { blocks, cost: bestCost, fitCost: bestFit, fitSym, assigned, end: bu };
 }
 
 export function alignLyrics(
@@ -698,6 +1048,10 @@ export function alignLyrics(
 	const lines = linesIn.filter((l) => isAlignable(l.text));
 	if (!lines.length) return [];
 	const sylls = lines.map((l) => countSyllables(l.text));
+	// Sprint E tempo, measured UP FRONT (one computation feeds the grid
+	// searches below; the comb experiment also consumed it, rejected)
+	const avgSylls = sylls.length ? sylls.reduce((a, b) => a + b, 0) / sylls.length : 0;
+	const estRate = energy && energy.length >= 10 ? estimateTempo(energy, avgSylls) : -1;
 	const rawSegs = cleanSegments(segments);
 	// vocalness is a property of the RAW block: refined slices are dip-free
 	// by construction (they're cut AT the dips), so they must inherit it.
@@ -830,6 +1184,18 @@ export function alignLyrics(
 	let segsUsed = 0;
 	let cost = 0;
 	let bestRate = MS_PER_SYLLABLE;
+	let fitSym = Infinity; // Sprint F: chosen pass-1 partition's symmetric fit
+	// Sprint E (estRate measured up front, before refineSegments): the fit
+	// landscape CANNOT identify the rate at ~50% VAD recall (heard segment
+	// time ≈ half the true sung time, so duration tiling always prefers the
+	// grid floor — measured: even a 0.25/ms prior couldn't move a single
+	// right estimate past it). So the measurement DECIDES: with a confident
+	// estimate the grid is clamped to est±20 and the fit only breaks ties
+	// inside; without one (abstain) the full grid + symmetric fit decides
+	const ratePrior = (rate: number) => (estRate > 0 ? W_RATE_PRIOR * Math.abs(rate - estRate) : 0);
+	const gMin = estRate > 0 ? Math.max(RATE_MIN, estRate - 20) : RATE_MIN;
+	const gMax = estRate > 0 ? Math.min(RATE_MAX, estRate + 20) : RATE_MAX;
+	if (stats) stats.tempo = estRate;
 	// per-line expected duration at the calibrated prior rate — the
 	// Anchor Locking oversized-seg gate must not trust the DP's per-block
 	// rate hypothesis (circular: a wrong fast-rate block inflates exp and
@@ -839,16 +1205,22 @@ export function alignLyrics(
 	if (nLines > i0) {
 		const supers = buildSupers(segs, segVoc, j0, jEnd);
 		if (supers.length > 0) {
-			// pass 1 rate grid — selected by fit cost: trailing line skips
-			// scale with the rate itself and would bias the grid (same
-			// rationale as dpSolve's fitCost)
-			let p1: { blocks: Pass1Block[]; cost: number; fitCost: number; assigned: boolean[]; end: number } | null = null;
-			for (let rate = RATE_MIN; rate <= RATE_MAX; rate += RATE_STEP) {
+			// pass 1 rate grid — selected by SYMMETRIC fit + tempo prior:
+			// trailing line skips scale with the rate itself and would bias
+			// the grid (same rationale as dpSolve's fitCost), and the
+			// asymmetric mismatch has a systematic gradient toward fast
+			// rates (see DpResult.fitSym)
+			let p1: { blocks: Pass1Block[]; cost: number; fitCost: number; fitSym: number; assigned: boolean[]; end: number } | null = null;
+			let p1Score = Infinity;
+			for (let rate = gMin; rate <= gMax; rate += RATE_STEP) {
 				const expR = sylls.map((s) => expectedDuration(s, rate));
 				const r = pass1Solve(expR, supers, nLines, i0);
-				if (!p1 || r.fitCost < p1.fitCost) {
+				const score = r.fitSym + ratePrior(rate);
+				if (!p1 || score < p1Score) {
 					p1 = r;
+					p1Score = score;
 					bestRate = rate;
+					fitSym = r.fitSym;
 				}
 			}
 			if (p1) {
@@ -856,12 +1228,15 @@ export function alignLyrics(
 				// segments with the block's own tempo
 				for (const b of p1.blocks) {
 					let best: DpResult | null = null;
+					let bestScore = Infinity;
 					let blockRate = MS_PER_SYLLABLE;
-					for (let rate = RATE_MIN; rate <= RATE_MAX; rate += RATE_STEP) {
+					for (let rate = gMin; rate <= gMax; rate += RATE_STEP) {
 						const expR = sylls.map((s) => expectedDuration(s, rate));
 						const r = dpSolve(expR, segs, segVoc, b.i1, b.i0, b.j0, b.j1);
-						if (!best || r.fitCost < best.fitCost) {
+						const score = r.fitSym + ratePrior(rate);
+						if (!best || score < bestScore) {
 							best = r;
+							bestScore = score;
 							blockRate = rate;
 						}
 					}
@@ -924,6 +1299,7 @@ export function alignLyrics(
 		let evidence = 0;
 		for (let j = j0; j < jEnd; j++) evidence += segs[j].end - segs[j].start;
 		stats.normCost = cost / Math.max(1, evidence);
+		stats.fitSym = fitSym;
 	}
 
 	if (!groups.length) {
@@ -970,12 +1346,35 @@ export function alignLyrics(
 			lineVoc[g.lines[0]] = segLockVoc[lastSeg];
 		} else {
 			const total = g.lines.reduce((s, idx) => s + exp[idx], 0) || 1;
+			const prop: number[] = [];
 			let cum = 0;
 			for (const idx of g.lines) {
-				times[idx] = start + ((end - start) * cum) / total;
+				prop.push(start + ((end - start) * cum) / total);
 				cum += exp[idx];
-				lineSeg[idx] = lastSeg;
-				lineVoc[idx] = segLockVoc[lastSeg];
+			}
+			// Sprint D: snap shared lines onto onset anchors — the
+			// proportional spread is a pacing guess; interior energy rises
+			// (plus interior segment starts — real VAD pauses) are
+			// measurements of where the lines actually start
+			let seat = prop;
+			if (energy && energy.length >= 10) {
+				const cands = detectOnsets(energy, start, end);
+				for (let x = g.segIdx + 1; x < g.segIdx + g.segCount; x++)
+					cands.push(segs[x].start);
+				cands.sort((a, b) => a - b);
+				if (cands.length)
+					seat = snapToOnsets(
+						g.lines.map((idx) => exp[idx]),
+						prop,
+						start,
+						end,
+						cands
+					);
+			}
+			for (let x = 0; x < g.lines.length; x++) {
+				times[g.lines[x]] = seat[x];
+				lineSeg[g.lines[x]] = lastSeg;
+				lineVoc[g.lines[x]] = segLockVoc[lastSeg];
 			}
 			for (let x = 0; x < g.lines.length; x++) {
 				lineEnd[g.lines[x]] = x + 1 < g.lines.length ? times[g.lines[x + 1]] : end;
