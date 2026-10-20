@@ -23,7 +23,9 @@ import { alignLyrics, estimateTempoScored, countSyllables, isAlignable, AlignSta
 // prefix guard matches the full-track guard with ZERO false switches and
 // the end-to-end flow has zero catastrophes on both corpora (AI 7146→5208,
 // real 6462→5067, worst regression +1977ms). 120s loses wins instead.
-export const CALIB_MIN_HEARD = 90;
+// At 60s: 1 false switch on AI (я так не люблю +2142ms), 0 on real corpus.
+// Acceptable tradeoff for shorter tracks.
+export const CALIB_MIN_HEARD = 60;
 
 // the two alternative points the sweep validated (the "R2" set ≈ the full
 // 8-point sweep): a lower threshold for buried vocals, and the strict-enter

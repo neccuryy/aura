@@ -153,8 +153,12 @@ export function titleMatch(a: string | undefined | null, b: string | undefined |
 	const na = normTitle(a), nb = normTitle(b);
 	if (!na || !nb) return false;
 	if (na === nb) return true;
+	// strict length guard: titles must be within 15% of each other's length
+	// (prevents "NANANANA" vs "NaNaNa" and similar case variations)
 	const shorter = na.length < nb.length ? na : nb;
 	const longer = na.length < nb.length ? nb : na;
+	const ratio = shorter.length / longer.length;
+	if (ratio < 0.85) return false;
 	if (longer.includes(shorter) && shorter.length >= longer.length * 0.65) return true;
 	// censored title on one side — retry with masked words dropped
 	if (MASK_CHARS.test(a || "") || MASK_CHARS.test(b || "")) {

@@ -712,6 +712,7 @@ function createWindow(): void {
 		// (fully transparent, blending into the fluid background)
 		titleBarStyle: "hidden",
 		webPreferences: {
+			nodeIntegration: false,  // security: block require() in renderer
 			contextIsolation: true,
 			preload: path.join(__dirname, "preload.js")
 		}

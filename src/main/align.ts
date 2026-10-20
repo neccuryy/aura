@@ -1415,8 +1415,10 @@ const LOCK_SPAN_SLACK = 1.0; // s — max unexplained vocal time left in the
 // later line forward, one stolen seg snowballing into a whole-verse shift
 const LOCK_MIN_BLOCKS = 6; // raw VAD blocks before the level estimate is
 // mature — below this a "vocal" verdict can still flip as vocals arrive
-const LOCK_MAX_NORM_COST = 0.45; // план item 6: DP cost per second of
+const LOCK_MAX_NORM_COST = 0.35; // план item 6: DP cost per second of
 // evidence — a cram is an expensive fit; freeze nothing the solver hates
+// Reduced from 0.45 to 0.35: fast rap (150ms/syll) has normCost ~0.25-0.3,
+// old 0.45 blocked valid fast-alignments
 const SEEK_JUMP_S = 1.5; // |Δposition − Δwall| beyond this = seek/replay
 
 export class AnchorLocker {
