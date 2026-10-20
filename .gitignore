@@ -3,7 +3,7 @@ node_modules/
 
 # build output
 dist/
-targets/
+targets*/
 native/loopback/build/
 
 # local config (real one lives in %APPDATA%/aura)
@@ -17,3 +17,4 @@ Thumbs.db
 .qwen-*
 план.txt
 .benchmark/
+nul
