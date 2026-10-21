@@ -1,177 +1,215 @@
-# аura
+<div align="center">
 
-**Караоке-компаньон для любого плеера Windows.**
+<img src="assets/icon.png" width="120" alt="aura" />
 
-aura сидит в трее твоей системы, слушает, что играет через **SMTC** (System Media Transport Controls — системный API Windows, через который плееры отчитывают текущий трек), и показывает текст песни в стиле караоке — как в Яндекс Музыке. Работает с любым плеером, который интегрируется с SMTC: Яндекс Музыка, браузеры, Spotify, AIMP, foobar2000 и т.д.
+# aura
 
----
+**Synced lyrics for any Windows player**
 
-## Возможности
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg)](https://github.com/neccuryy/aura/releases)
+[![Release](https://img.shields.io/github/v/release/neccuryy/aura.svg)](https://github.com/neccuryy/aura/releases)
 
-### Тексты песен
+[🇷🇺 Читать на русском](README.ru.md)
 
-Полная цепочка поиска — от самого точного к онлайн-фолбэкам:
+<p align="center"><img src="assets/demo.gif" width="880" alt="aura in action — synced lyrics highlighting"></p>
 
-1. **Локальный `.lrc`** — файл с таймингами, лежащий рядом с mp3 (или в любой папке из настроек). Название должно совпадать с mp3: `1. не.кури.mp3` → `1. не.кури.lrc`. Поддерживаются enhanced-LRC, мульти-таймстампы, UTF-8/UTF-16/cp1251.
-2. **[Lrclib](https://lrclib.net)** — бесплатная база синхронизированных текстов (без токена). Сначала точный запрос (название + исполнитель + длительность), затем поиск со скорингом: совпадение названия обязательно, исполнитель и длительность дают бонус. Отдаёт **синхронизированный** текст → полноценное караоке.
-3. **[Genius](https://genius.com)** — для треков, которых нет в Lrclib. Текст без таймингов: в dev-сборке включается живое выравнивание (см. ниже), в релизе — просто читается. Требует Client Access Token (см. [Конфигурация](#конфигурация)).
-4. Ничего не нашлось — аккуратная заглушка.
-
-Пока идёт онлайн-поиск — лоадер (три пульсирующие точки). Кнопка «Не тот текст» (крестик сбоку) сбрасывает кеш трека и переспрашивает строже — с точным совпадением названия.
-
-**Переключатель источников:** если у трека нашлось несколько источников (локальный `.lrc`, Lrclib, Genius, выравнивание aura), слева над обложкой появляются стрелки `‹ название ›` — они листают источники. Выбранный вручную источник держит экран до смены трека.
-
-**Кеш:** найденные тексты и «промахи» кешируются в `%APPDATA%\aura\lyrics` — повторные включения трека мгновенны. Промах кешируется только если обе базы точно ответили «нет»; сетевая ошибка кеш не отравляет. Сюда же попадают выравнивания aura (см. ниже).
-
-### Караоке-режим (синхронизированный текст)
-
-- Активная строка крупнее и ярче, соседние — с плавным асимметричным блюром
-- Плавный автоскролл (easeInOutCubic, 220–800 мс), который отменяется колесом мыши
-- **Клик по строке** — перемотка трека на этот момент
-- Позиция берётся из нативного `GetPosition` с экстраполяцией — текст не дёргается между апдейтами таймлайна плеера
-
-### Живое выравнивание (aura) — пока dev-only
-
-Когда нашёлся только текст без таймингов (Genius, plain-текст Lrclib, несинхронизированный `.lrc`), aura делает из него синхронизированный сама — прямо во время прослушивания:
-
-- **Захват системного звука** (WASAPI loopback): слышно ровно то, что реально играет в плеере — с любым плеером
-- **Выделение вокала без нейросетей**: mid/side-разделение стерео (вокал сведён в центре), полоса речи 300–3400 Гц, VAD с адаптивным порогом шума
-- **DP-выравнивание**: строки привязываются к вокальным сегментам двухпроходным динамическим программированием (блоки → строки), с onset-анкерами и оценкой темпа из автокорреляции огибающей
-- **Живой пересчёт** каждые 5 секунд по мере накопления свидетельств; прошедшие строки с устойчивой привязкой замораживаются (Anchor Locking) — подсветка не прыгает назад
-- **Кеш**: в конце прослушивания результат проходит контроль качества (полнота прослушивания, покрытие вокалом, стоимость DP, монотонность) и кешируется как источник «aura» — следующее включение стартует сразу синхронизированным. Настоящий synced-вердикт (Lrclib) никогда не перезаписывается
-
-В релизной сборке этот путь пока выключен — работает только dev-запуск (`npm start`).
-
-### Обложки
-
-- Арт из SMTC показывается мгновенно
-- Если системный арт мелкий (<480px) — в фоне подтягивается 512px-версия с iTunes Search API / Deezer
-- **Строгий матчинг** названия и исполнителя — обложка «чужой песни» не принимается
-- Кеш обложек: `%APPDATA%\aura\covers` (с авто-очисткой при смене версии кеша)
-
-### Интерфейс
-
-- Раскладка 50/50: слева обложка + метаданные + управление, справа текст; всё масштабируется под размер окна (`clamp()`, viewport-единицы)
-- **Палитра из обложки** — фон, акценты и даже нативный тайтл-бар перекрашиваются под арт трека (node-vibrant)
-- Кнопки плеера (⏮ ▶ ⏭) поверх обложки при наведении, seek-бар с перемоткой
-- Гамбургер-меню (☰): папки с музыкой, кеш текстов (размер + очистка), Genius-токен, игнор-лист источников, полный экран; открывается вниз, а если не влезает — вверх
-- Окно перетаскивается за верхнюю зону; нативный тайтл-бар скрыт и перекрашен под палитру
-- Fullscreen (F11), Escape закрывает меню
+</div>
 
 ---
 
-## Конфигурация
+aura listens to whatever is playing on your machine — any player that reports
+to Windows **SMTC** (System Media Transport Controls): Yandex Music, browsers,
+Spotify, AIMP, foobar2000… — finds the lyrics and highlights the current line
+in real time, the way Yandex Music does.
 
-Файл: `%APPDATA%\aura\config.json`
+## Features
+
+- **Works with any player** — reads the system media session; no per-player integration, no hooks into the player process
+- **Complete lyrics pipeline** — local `.lrc` → [Lrclib](https://lrclib.net) (synced) → [Genius](https://genius.com) (plain), with strict title/artist/duration matching
+- **Real-time highlighting** — the active line grows and brightens, neighbors blur; smooth auto-scroll; click any line to seek
+- **Live alignment** *(dev builds for now)* — when only plain lyrics exist, aura syncs them itself while the song plays: vocals are isolated from the system audio with classic DSP and lines are placed with dynamic programming — no neural networks, no model downloads
+- **Palette from the album art** — background, accents and even the title bar recolor to match the cover
+- **Everything is cached** — lyrics, misses and alignments; replays are instant, and a track listened to once starts synced the next time
+- **Auto-update** via GitHub Releases
+
+## Install
+
+Grab the latest installer from **[Releases](https://github.com/neccuryy/aura/releases)** and run it.
+
+Or run from source (Node.js, Windows):
+
+```bash
+npm install
+npm start
+```
+
+## Screenshots
+
+<p align="center">
+<table>
+  <tr>
+    <td><img src="assets/demo.png" width="330" alt="Synced lyrics — the active line highlighted"></td>
+    <td><img src="assets/demo1.png" width="330" alt="Layout — cover, metadata, controls, lyrics"></td>
+    <td><img src="assets/demo2.png" width="330" alt="Synced lyrics from Lrclib — source badge above the cover"></td>
+  </tr>
+  <tr align="center">
+    <td>Synced lyrics — the active line highlighted, palette from the cover</td>
+    <td>50/50 layout — cover, metadata, controls</td>
+    <td>Synced lyrics from Lrclib — source badge above the cover</td>
+  </tr>
+</table>
+</p>
+
+---
+
+## Lyrics sources
+
+The full search chain, from most precise to online fallbacks:
+
+1. **Local `.lrc`** — a file with timings sitting next to the mp3 (or in any indexed folder). The name must match the mp3: `1. track.mp3` → `1. track.lrc`. Enhanced LRC, multiple timestamps per line and UTF-8/UTF-16/cp1251 encodings are supported.
+2. **[Lrclib](https://lrclib.net)** — a free, token-less database of synced lyrics. An exact query first (title + artist + duration), then search with scoring: a matching title is required, artist and duration add weight. Returns **synced** lyrics → full per-line highlighting.
+3. **[Genius](https://genius.com)** — for tracks missing from Lrclib. Plain text (no timings): dev builds align it live (see below), release builds show it as-is. Requires a Client Access Token (see [Configuration](#configuration)).
+4. Nothing found — a tidy placeholder.
+
+While the search runs you get a loader. The **"wrong lyrics"** button (the ✕ on the side) drops the cached verdict and re-searches in strict mode (exact title match).
+
+**Source switcher:** when a track has several sources (local `.lrc`, Lrclib, Genius, an aura alignment), arrows `‹ name ›` appear above the cover and cycle through them. A manually picked source keeps the screen until the track changes.
+
+**Cache:** verdicts and misses are cached in `%APPDATA%\aura\lyrics` — replays are instant. A miss is only cached when both services answered a definitive "no"; network errors never poison the cache. aura alignments land here too (see below).
+
+## Live alignment (dev-only for now)
+
+When only plain lyrics are available (Genius, plain Lrclib text, an unsynced local `.lrc`), aura turns them into synced lyrics itself — while the song plays:
+
+- **System audio capture** (WASAPI loopback): it hears exactly what the player actually outputs, with any player
+- **Vocal isolation without neural nets**: mid/side stereo split (vocals sit dead center in a mix), a 300–3400 Hz speech band, and a VAD with an adaptive noise-floor threshold
+- **DP alignment**: lines are matched to vocal segments with a two-pass dynamic program (blocks → lines), guided by onset anchors and a tempo estimate from envelope autocorrelation
+- **Live re-solving** every 5 seconds as evidence accumulates; passed lines with a stable binding freeze (Anchor Locking) — the highlight never jumps back into played text
+- **Cache**: when the track ends, the result passes a quality gate (listen completion, vocal coverage, DP cost, monotonicity) and is cached as the "aura" source — the next play starts synced. A genuine synced verdict (Lrclib) is never overwritten
+
+This path is currently disabled in packaged builds — dev runs only (`npm start`).
+
+## Covers
+
+- SMTC artwork shows instantly
+- If the system art is small (<480px), a 512px version is fetched in the background from the iTunes Search API / Deezer
+- **Strict matching** of title and artist — a "wrong song" cover is never accepted
+- Cover cache: `%APPDATA%\aura\covers` (auto-wiped when the cache format version changes)
+
+## Interface
+
+- 50/50 layout: cover + metadata + controls on the left, lyrics on the right; everything scales with the window (`clamp()`, viewport units)
+- **Palette from the cover** — background, accents and even the native title bar recolor to the artwork (node-vibrant)
+- Player buttons (⏮ ▶ ⏭) over the cover on hover, seek bar with scrubbing
+- Hamburger menu (☰): music folders, lyrics cache (size + clear), Genius token, source ignore list, fullscreen
+- The window drags by its top zone; the native title bar is hidden and recolored to the palette
+- Fullscreen (F11), Escape closes the menu
+
+## Configuration
+
+File: `%APPDATA%\aura\config.json`
 
 ```json
 {
 	"musicFolders": ["D:\\Music"],
-	"geniusToken": "твой-client-access-token"
+	"geniusToken": "your-client-access-token"
 }
 ```
 
-| Поле | Назначение |
+| Field | Purpose |
 |---|---|
-| `musicFolders` | Папки, где искать mp3 + `.lrc` (индексация в фоне) |
-| `geniusToken` | Client Access Token Genius — берётся на [странице API-клиентов](https://genius.com/api-clients) («Generate Access Token»). Нужен только для фолбэка на Genius; без него цепочка — `.lrc` → Lrclib |
-| `ignoredApps` | SMTC-источники, которые aura должна игнорировать (мессенджеры с голосовыми и т.п.). Управляется из настроек, раздел «Игнорировать» |
+| `musicFolders` | Folders to index for mp3 + `.lrc` (indexed in the background) |
+| `geniusToken` | Genius Client Access Token — from the [API clients page](https://genius.com/api-clients) ("Generate Access Token"). Only needed for the Genius fallback; without it the chain is `.lrc` → Lrclib |
+| `ignoredApps` | SMTC sources aura should ignore (messengers with voice messages etc.). Managed from settings, the "Ignore" section |
 
-Обычно папки добавляются через UI: меню ☰ → «Папки с музыкой».
+Folders are usually added via the UI: menu ☰ → "Music folders".
 
----
-
-## Как это работает
+## How it works
 
 ```
-┌───────────────────────── Процессы ─────────────────────────┐
+┌───────────────────────── Processes ─────────────────────────┐
 │                                                            │
-│  Плеер (Яндекс Музыка / браузер / …)                       │
+│  Player (Yandex Music / browser / …)                       │
 │    ├─ SMTC (Windows)                                       │
-│    │    └─ winplayer-node (нативный аддон, N-API)          │
-│    └─ системный звук: WASAPI loopback (dev)                │
-│         └─ нативный захват (aura_loopback)                 │
+│    │    └─ winplayer-node (native addon, N-API)            │
+│    └─ system audio: WASAPI loopback (dev)                  │
+│         └─ native capture (aura_loopback)                  │
 │              └─ Electron main (TypeScript)                 │
-│                   ├─ DSP: вокал → VAD-сегменты (dev)       │
-│                   ├─ DP-выравнивание строк текста (dev)    │
-│                   ├─ библиотека .lrc (music-metadata)      │
-│                   ├─ Lrclib API → Genius API + скрейп      │
-│                   ├─ обложки: iTunes / Deezer (sharp)      │
-│                   └─ палитра (node-vibrant)                │
+│                   ├─ DSP: vocals → VAD segments (dev)      │
+│                   ├─ DP alignment of lyric lines (dev)     │
+│                   ├─ .lrc library (music-metadata)         │
+│                   ├─ Lrclib API → Genius API + scraping    │
+│                   ├─ covers: iTunes / Deezer (sharp)       │
+│                   └─ palette (node-vibrant)                │
 │                        └─ IPC (contextIsolation + preload) │
 │                             └─ Renderer (HTML/CSS/JS)      │
 └────────────────────────────────────────────────────────────┘
 ```
 
-- **Main-процесс** опрашивает SMTC каждые 500 мс (один сериализованный цикл — нативные вызовы никогда не параллелятся), следит за сменой трека/статуса, гоняет онлайн-поиск текстов и обложек с токен-защитой от устаревших ответов.
-- **Renderer** — без сборки: чистые HTML/CSS/JS. Общение с main только через bridge `window.aura` (preload, `contextIsolation: true`).
-- **winplayer-node** — нативный C++ аддон (N-API, ABI-стабильный). Патчен локально (`patches/winplayer-node/`): мьютекс вокруг состояния сессий, снапшот активной сессии, колбэк строго вне лока, метка времени захвата позиции. Патчи устраняют гонку, которая роняла процесс.
+- The **main process** polls SMTC every 500 ms (a single serialized loop — native calls never run in parallel), tracks song/status changes and runs the online searches with stale-response protection.
+- The **renderer** has no build step: plain HTML/CSS/JS talking to main only through the `window.aura` bridge (preload, `contextIsolation: true`).
+- **winplayer-node** is a native C++ addon (N-API, ABI-stable), patched locally (`patches/winplayer-node/`): a mutex around session state, an active-session snapshot, the callback strictly outside the lock, a position capture timestamp. The patches fix a race that crashed the process.
 
-### Исходники
+### Sources
 
 ```
 src/
 ├── main/                  # Electron main (TypeScript → dist/)
-│   ├── index.ts           # точка входа: окно, IPC, цикл опроса SMTC
-│   ├── watcher.ts         # обёртка winplayer-node (сериализация вызовов)
-│   ├── loopback.ts        # WASAPI loopback: захват системного звука (dev)
-│   ├── dsp.ts             # DSP: mid/side, полоса речи, VAD-сегментация
-│   ├── align.ts           # DP-выравнивание строк по вокальным сегментам
-│   ├── calibrate.ts       # пер-трековая калибровка порога VAD
-│   ├── library.ts         # индексация папок: mp3 ↔ .lrc
-│   ├── lrc.ts             # парсер .lrc (+ декодирование BOM/UTF-16/cp1251)
-│   ├── lrclib.ts          # Lrclib API + общий кеш текстов
-│   ├── genius.ts          # Genius API (поиск) + скрейп текста со страницы
-│   ├── cover.ts           # обложки: iTunes/Deezer, строгий матчинг, кеш
-│   ├── palette.ts         # извлечение палитры из обложки
-│   ├── config.ts          # config.json (папки, geniusToken)
-│   ├── updater.ts         # авто-обновление через GitHub Releases
-│   └── preload.ts         # bridge window.aura
-└── renderer/              # UI (без сборки)
+│   ├── index.ts           # entry point: window, IPC, SMTC poll loop
+│   ├── watcher.ts         # winplayer-node wrapper (serialized calls)
+│   ├── loopback.ts        # WASAPI loopback: system audio capture (dev)
+│   ├── dsp.ts             # DSP: mid/side, speech band, VAD segmentation
+│   ├── align.ts           # DP alignment of lines to vocal segments
+│   ├── calibrate.ts       # per-track VAD threshold calibration
+│   ├── library.ts         # folder indexing: mp3 ↔ .lrc
+│   ├── lrc.ts             # .lrc parser (+ BOM/UTF-16/cp1251 decoding)
+│   ├── lrclib.ts          # Lrclib API + the shared lyrics cache
+│   ├── genius.ts          # Genius API (search) + page scraping
+│   ├── cover.ts           # covers: iTunes/Deezer, strict matching, cache
+│   ├── palette.ts         # palette extraction from the cover
+│   ├── config.ts          # config.json (folders, geniusToken)
+│   ├── updater.ts         # auto-update via GitHub Releases
+│   └── preload.ts         # window.aura bridge
+└── renderer/              # UI (no build step)
     ├── index.html
     ├── style.css
-    ├── fluid-bg.js        # жидкий WebGL-фон в цветах обложки (simplex noise + blur)
-    └── app.js             # рендер текста, караоке, скролл, меню
+    ├── fluid-bg.js        # WebGL fluid background in cover colors
+    └── app.js             # lyrics rendering, highlighting, scroll, menu
 ```
 
----
+## Development
 
-## Разработка
-
-Требуется Node.js, Windows, для пересборки нативного аддона — VS Build Tools + Python.
+Requires Node.js, Windows; VS Build Tools + Python to rebuild the native addon.
 
 ```bash
-npm install                # + postinstall пересоберёт нативные зависимости
-npm start                  # компиляция + запуск в dev-режиме
-npm run compile            # только TypeScript (tsc -b)
-node test-title-match.js   # unit-тест матчинга названий (cover.ts)
-node benchmark.js          # бенчмарк выравнивания на корпусе из musicFolders
-node benchmark.js --compare # диф двух последних прогонов
+npm install                 # postinstall rebuilds native dependencies
+npm start                   # compile + run in dev mode
+npm run compile             # TypeScript only (tsc -b)
+node test-title-match.js    # unit test for title matching (cover.ts)
+node benchmark.js           # alignment benchmark on the corpus from musicFolders
+node benchmark.js --compare # diff of the two latest runs
 ```
 
-### Сборка exe
+### Building the exe
 
 ```bash
-npm run build      # compile + electron-builder (nsis + zip → targets/)
+npm run build               # compile + electron-builder (nsis + zip → targets/)
 ```
 
-> Сборка пересобирает нативные зависимости из пропатченных исходников в `node_modules` — патчи `patches/winplayer-node/` попадают в билд автоматически.
+> The build rebuilds native dependencies from the patched sources in `node_modules` — the `patches/winplayer-node/` patches land in the build automatically.
 
----
+## App data
 
-## Данные приложения
+Everything lives in `%APPDATA%\aura`:
 
-Всё живёт в `%APPDATA%\aura`:
-
-| Путь | Что там |
+| Path | Contents |
 |---|---|
-| `config.json` | настройки (папки, токен Genius) |
-| `lyrics/` | кеш текстов (найденные `.json` + маркеры промахов `.miss`) |
-| `covers/` | кеш обложек (с авто-очисткой при смене версии формата) |
-| `crashes/` | дампы крашей (нативные аддоны) |
+| `config.json` | settings (folders, Genius token) |
+| `lyrics/` | lyrics cache (found `.json` + miss markers `.miss`) |
+| `covers/` | cover cache (auto-wiped on cache format version change) |
+| `crashes/` | crash dumps (native addons) |
 
----
-
-## Лицензия
+## License
 
 MIT

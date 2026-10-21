@@ -18,6 +18,8 @@ files:
   - "!benchmark.js"
   - "!.benchmark/**"
   - "!assets/make-icon.ps1"
+  # README demo media (demo.gif + demo*.png, ~10 MB) — docs, not runtime
+  - "!assets/demo*"
   - "!.qwen/**"
   - "!.qwen-*"
   - "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}"
