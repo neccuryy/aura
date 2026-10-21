@@ -2,15 +2,13 @@
 
 <img src="assets/icon.png" width="120" alt="aura" />
 
-# aura
-
 **Синхронизированные тексты песен для любого плеера Windows**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg)](https://github.com/neccuryy/aura/releases)
 [![Release](https://img.shields.io/github/v/release/neccuryy/aura.svg)](https://github.com/neccuryy/aura/releases)
 
-[🇬🇧 Read in English](README.md)
+[Read in English](README.md)
 
 <p align="center"><img src="assets/demo.gif" width="880" alt="aura в работе — построчная подсветка текста"></p>
 <p align="center"><img src="assets/demo.png" width="880" alt="aura — синхронизированный текст, активная строка подсвечена"></p>
@@ -138,7 +136,7 @@ npm start
 - **Renderer** — без сборки: чистые HTML/CSS/JS. Общение с main только через bridge `window.aura` (preload, `contextIsolation: true`).
 - **winplayer-node** — нативный C++ аддон (N-API, ABI-стабильный). Патчен локально (`patches/winplayer-node/`): мьютекс вокруг состояния сессий, снапшот активной сессии, колбэк строго вне лока, метка времени захвата позиции. Патчи устраняют гонку, которая роняла процесс.
 
-### Исходники
+## Исходники
 
 ```
 src/
@@ -178,7 +176,7 @@ node benchmark.js          # бенчмарк выравнивания на ко
 node benchmark.js --compare # диф двух последних прогонов
 ```
 
-### Сборка exe
+## Сборка exe
 
 ```bash
 npm run build              # compile + electron-builder (nsis + zip → targets/)
@@ -199,4 +197,4 @@ npm run build              # compile + electron-builder (nsis + zip → targets/
 
 ## Лицензия
 
-MIT
+[MIT](LICENSE)
