@@ -2,15 +2,13 @@
 
 <img src="assets/icon.png" width="120" alt="aura" />
 
-# aura
-
 **Synced lyrics for any Windows player**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg)](https://github.com/neccuryy/aura/releases)
 [![Release](https://img.shields.io/github/v/release/neccuryy/aura.svg)](https://github.com/neccuryy/aura/releases)
 
-[🇷🇺 Читать на русском](README.ru.md)
+[Читать на русском](README.ru.md)
 
 <p align="center"><img src="assets/demo.gif" width="880" alt="aura in action — synced lyrics highlighting"></p>
 <p align="center"><img src="assets/demo.png" width="880" alt="aura — synced lyrics, active line highlighted"></p>
@@ -46,8 +44,6 @@ Or run from source (Node.js, Windows):
 npm install
 npm start
 ```
-
----
 
 ## Lyrics sources
 
@@ -107,7 +103,7 @@ File: `%APPDATA%\aura\config.json`
 |---|---|
 | `musicFolders` | Folders to index for mp3 + `.lrc` (indexed in the background) |
 | `geniusToken` | Genius Client Access Token — from the [API clients page](https://genius.com/api-clients) ("Generate Access Token"). Only needed for the Genius fallback; without it the chain is `.lrc` → Lrclib |
-| `ignoredApps` | SMTC sources aura should ignore (messengers with voice messages etc.). Managed from settings, the "Ignore" section |
+| `ignoredApps` | SMTC  aura should ignore (messengers with voice messages etc.). Managed from settings, the "Ignore" section |
 
 Folders are usually added via the UI: menu ☰ → "Music folders".
 
@@ -137,7 +133,7 @@ Folders are usually added via the UI: menu ☰ → "Music folders".
 - The **renderer** has no build step: plain HTML/CSS/JS talking to main only through the `window.aura` bridge (preload, `contextIsolation: true`).
 - **winplayer-node** is a native C++ addon (N-API, ABI-stable), patched locally (`patches/winplayer-node/`): a mutex around session state, an active-session snapshot, the callback strictly outside the lock, a position capture timestamp. The patches fix a race that crashed the process.
 
-### Sources
+## Sources
 
 ```
 src/
@@ -177,7 +173,7 @@ node benchmark.js           # alignment benchmark on the corpus from musicFolder
 node benchmark.js --compare # diff of the two latest runs
 ```
 
-### Building the exe
+## Building the exe
 
 ```bash
 npm run build               # compile + electron-builder (nsis + zip → targets/)
@@ -198,4 +194,4 @@ Everything lives in `%APPDATA%\aura`:
 
 ## License
 
-MIT
+[MIT](LICENSE)
