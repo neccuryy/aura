@@ -103,7 +103,7 @@ File: `%APPDATA%\aura\config.json`
 |---|---|
 | `musicFolders` | Folders to index for mp3 + `.lrc` (indexed in the background) |
 | `geniusToken` | Genius Client Access Token — from the [API clients page](https://genius.com/api-clients) ("Generate Access Token"). Only needed for the Genius fallback; without it the chain is `.lrc` → Lrclib |
-| `ignoredApps` | SMTC  aura should ignore (messengers with voice messages etc.). Managed from settings, the "Ignore" section |
+| `ignoredApps` | SMTC sources aura should ignore (messengers with voice messages etc.). Managed from settings, the "Ignore" section |
 
 Folders are usually added via the UI: menu ☰ → "Music folders".
 
