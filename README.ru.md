@@ -13,6 +13,9 @@
 [🇬🇧 Read in English](README.md)
 
 <p align="center"><img src="assets/demo.gif" width="880" alt="aura в работе — построчная подсветка текста"></p>
+<p align="center"><img src="assets/demo.png" width="880" alt="aura — синхронизированный текст, активная строка подсвечена"></p>
+<p align="center"><img src="assets/demo1.png" width="880" alt="aura — обложка, метаданные, управление, текст"></p>
+<p align="center"><img src="assets/demo2.png" width="880" alt="aura — синхронизированный текст с Lrclib"></p>
 
 </div>
 
@@ -44,23 +47,6 @@ AIMP, foobar2000 и т.д. — находит текст песни и подс�
 npm install
 npm start
 ```
-
-## Скриншоты
-
-<p align="center">
-<table>
-  <tr>
-    <td><img src="assets/demo.png" width="330" alt="Синхронизированный текст — активная строка подсвечена"></td>
-    <td><img src="assets/demo1.png" width="330" alt="Раскладка — обложка, метаданные, управление, текст"></td>
-    <td><img src="assets/demo2.png" width="330" alt="Синхронизированный текст с Lrclib — бейдж источника над обложкой"></td>
-  </tr>
-  <tr align="center">
-    <td>Синхронизированный текст — активная строка подсвечена, палитра из обложки</td>
-    <td>Раскладка 50/50 — обложка, метаданные, управление</td>
-    <td>Синхронизированный текст с Lrclib — бейдж источника</td>
-  </tr>
-</table>
-</p>
 
 ---
 

@@ -13,6 +13,9 @@
 [🇷🇺 Читать на русском](README.ru.md)
 
 <p align="center"><img src="assets/demo.gif" width="880" alt="aura in action — synced lyrics highlighting"></p>
+<p align="center"><img src="assets/demo.png" width="880" alt="aura — synced lyrics, active line highlighted"></p>
+<p align="center"><img src="assets/demo1.png" width="880" alt="aura — cover, metadata, controls, lyrics"></p>
+<p align="center"><img src="assets/demo2.png" width="880" alt="aura — synced lyrics from Lrclib"></p>
 
 </div>
 
@@ -43,23 +46,6 @@ Or run from source (Node.js, Windows):
 npm install
 npm start
 ```
-
-## Screenshots
-
-<p align="center">
-<table>
-  <tr>
-    <td><img src="assets/demo.png" width="330" alt="Synced lyrics — the active line highlighted"></td>
-    <td><img src="assets/demo1.png" width="330" alt="Layout — cover, metadata, controls, lyrics"></td>
-    <td><img src="assets/demo2.png" width="330" alt="Synced lyrics from Lrclib — source badge above the cover"></td>
-  </tr>
-  <tr align="center">
-    <td>Synced lyrics — the active line highlighted, palette from the cover</td>
-    <td>50/50 layout — cover, metadata, controls</td>
-    <td>Synced lyrics from Lrclib — source badge above the cover</td>
-  </tr>
-</table>
-</p>
 
 ---
 
