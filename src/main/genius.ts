@@ -1,5 +1,5 @@
 import * as https from "https";
-import { normTitle, looseMatch, titleMatch, stripBrackets, translit, dropMaskedWords } from "./cover";
+import { normTitle, looseMatch, titleMatch, stripBrackets, translit, dropMaskedWords, userAgent } from "./cover";
 import type { OnlineLyrics } from "./lrclib";
 
 // Genius: the official API returns metadata only — the lyrics themselves
@@ -168,7 +168,7 @@ export async function getGeniusLyrics(
 	for (const q of queries) {
 		const search = await fetch(
 			`https://api.genius.com/search?q=${encodeURIComponent(q)}`,
-			{ Authorization: `Bearer ${token}`, "User-Agent": "aura/0.1.0" }
+			{ Authorization: `Bearer ${token}`, "User-Agent": userAgent() }
 		);
 		if (!search) return { result: null, definitive: false };
 		// a non-200 search (403 rate limit, 5xx) says nothing about whether

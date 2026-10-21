@@ -311,7 +311,6 @@ export function getTrackSegments(): { start: number; end: number }[] {
 		if (end - start < 0.2) continue;
 		out.push({ start, end });
 	}
-	console.log(`[align] segs(track): ${out.map((s) => `${s.start.toFixed(1)}–${s.end.toFixed(1)}`).join(", ") || "(none)"}`);
 	return out;
 }
 

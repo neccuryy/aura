@@ -4,7 +4,7 @@ import * as path from "path";
 import { createHash } from "crypto";
 import { app } from "electron";
 import { parseLrc, LrcFile } from "./lrc";
-import { normTitle, looseMatch, titleMatch, stripBrackets } from "./cover";
+import { normTitle, looseMatch, titleMatch, stripBrackets, userAgent } from "./cover";
 import { getGeniusLyrics } from "./genius";
 
 // Lrclib (https://lrclib.net) — free, no-token API for synced lyrics.
@@ -29,7 +29,6 @@ export interface OnlineLyrics {
 }
 
 const REQUEST_TIMEOUT = 8000;
-const USER_AGENT = "aura/0.1.0 (https://github.com/aura-app)";
 
 function fetchJson(url: string, redirects = 0): Promise<{ status: number; data: unknown } | null> {
 	return new Promise((resolve) => {
@@ -39,7 +38,7 @@ function fetchJson(url: string, redirects = 0): Promise<{ status: number; data: 
 		if (redirects > 5) return resolve(null);
 		const req = https.get(url, {
 			timeout: REQUEST_TIMEOUT,
-			headers: { "User-Agent": USER_AGENT },
+			headers: { "User-Agent": userAgent() },
 		}, (res) => {
 			if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400) {
 				const loc = res.headers.location;

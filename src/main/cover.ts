@@ -8,6 +8,14 @@ import sharp from "sharp";
 // SMTC sessions don't always carry artwork (e.g. Yandex Music) — fall back to
 // the public iTunes Search API, which covers most artists, and cache on disk
 
+// shared User-Agent for every outbound API request (covers, Lrclib, Genius) —
+// version-tracked so it can't drift stale between modules. A function, not a
+// module-level constant: cover.js is also required outside Electron
+// (test-title-match.js), where app is undefined at load time
+export function userAgent(): string {
+	return `aura/${app.getVersion()} (https://github.com/neccuryy/aura)`;
+}
+
 export async function artWidth(buf: Buffer): Promise<number> {
 	try {
 		const meta = await sharp(buf).metadata();
@@ -48,7 +56,7 @@ function cacheKey(artist: string, title: string): string {
 
 function fetchText(url: string): Promise<string> {
 	return new Promise((resolve, reject) => {
-		const req = https.get(url, { headers: { "User-Agent": "aura/0.1.0" } }, (res) => {
+		const req = https.get(url, { headers: { "User-Agent": userAgent() } }, (res) => {
 			if (res.statusCode !== 200) {
 				res.resume();
 				return reject(new Error("HTTP " + res.statusCode));
@@ -64,7 +72,7 @@ function fetchText(url: string): Promise<string> {
 
 function fetchBuffer(url: string): Promise<Buffer> {
 	return new Promise((resolve, reject) => {
-		const req = https.get(url, { headers: { "User-Agent": "aura/0.1.0" } }, (res) => {
+		const req = https.get(url, { headers: { "User-Agent": userAgent() } }, (res) => {
 			if (res.statusCode !== 200) {
 				res.resume();
 				return reject(new Error("HTTP " + res.statusCode));
@@ -207,7 +215,12 @@ export async function getFallbackCover(title: string, artist: string): Promise<B
 	const missMarker = path.join(dir, key + ".miss");
 	if (fs.existsSync(missMarker)) return null;
 
-	const cached = fs.readdirSync(dir).find((f) => f.startsWith(key + "."));
+	let cached: string | undefined;
+	try {
+		cached = fs.readdirSync(dir).find((f) => f.startsWith(key + "."));
+	} catch (_e) {
+		// cache dir vanished between mkdir and read — fall through to a fetch
+	}
 	if (cached) {
 		try {
 			return fs.readFileSync(path.join(dir, cached));
